@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: videodub-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/temp:/app/temp
+      - ./backend/output:/app/output
+      - ./backend/cookies:/app/cookies
+      - backend_data:/app/data
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///./data/videodub.db
+    restart: unless-stopped
+    # GPU support (optional - uncomment if you have NVIDIA GPU and nvidia-container-toolkit)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: videodub-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  backend_data:

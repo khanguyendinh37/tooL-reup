@@ -9,9 +9,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# FFmpeg's subtitles filter uses libass's default 384x288 script canvas for
-# SRT cues. Convert pixel geometry to this canvas before setting MarginV.
-ASS_PLAYRES_HEIGHT = 288
+# The old SRT path depended on libass's default 384x288 script canvas. New
+# ASS files use the actual video frame as their canvas; this reference height
+# only keeps the existing compact subtitle size consistent across resolutions.
+ASS_REFERENCE_PLAYRES_HEIGHT = 288
 
 from app.core.downloader import download_video, get_video_duration
 from app.core.paths import OUTPUT_DIR, TEMP_DIR
@@ -51,9 +52,99 @@ def hex_to_ass(color: str, default: str = "FFFFFF") -> str:
 
 
 def _escape_ffmpeg_filter_path(path: str) -> str:
-    """Make a local path safe for FFmpeg's subtitles filter syntax."""
+    """Make a local path safe for FFmpeg's subtitle filter syntax."""
     normalized = os.path.abspath(path).replace("\\", "/")
     return normalized.replace("'", "\\'").replace(":", "\\:")
+
+
+def _format_ass_timestamp(value: object) -> str:
+    """Format seconds as an ASS timestamp with centisecond precision."""
+    try:
+        total_centiseconds = max(int(round(float(value) * 100)), 0)
+    except (TypeError, ValueError):
+        total_centiseconds = 0
+
+    hours, remainder = divmod(total_centiseconds, 360000)
+    minutes, remainder = divmod(remainder, 6000)
+    seconds, centiseconds = divmod(remainder, 100)
+    return f"{hours}:{minutes:02d}:{seconds:02d}.{centiseconds:02d}"
+
+
+def _escape_ass_text(value: object) -> str:
+    """Keep subtitle text from being interpreted as ASS override tags."""
+    backslash = chr(92)
+    newline = chr(10)
+    text = str(value or "").replace(chr(13) + newline, newline).replace(chr(13), newline)
+    text = text.replace(backslash, backslash + backslash)
+    text = text.replace("{", backslash + "{").replace("}", backslash + "}")
+    return text.replace(newline, backslash + "N")
+
+
+def _write_positioned_ass_subtitles(
+    srt_path: str,
+    ass_path: str,
+    video_width: int,
+    video_height: int,
+    font_size: int,
+    outline_width: int,
+    font_color: str,
+    outline_color: str,
+    position_y: float,
+) -> str:
+    """Create an ASS file whose coordinate system matches the video frame.
+
+    The preview stores the subtitle's center as a normalized top-down value.
+    ASS alignment 5 plus ``\\pos`` uses the same center anchor, so no
+    resolution-dependent MarginV conversion is needed.
+    """
+    width = max(int(video_width), 1)
+    height = max(int(video_height), 1)
+    x = width // 2
+    y = min(max(int(round(height * position_y)), 0), height)
+    scale = height / ASS_REFERENCE_PLAYRES_HEIGHT
+    ass_font_size = max(int(round(font_size * scale)), 1)
+    ass_outline_width = max(int(round(outline_width * scale)), 0)
+
+    segments = srt_to_segments(srt_path)
+    dialogue_lines = []
+    for segment in segments:
+        text = _escape_ass_text(segment.get("text", ""))
+        if not text.strip():
+            continue
+        start = _format_ass_timestamp(segment.get("start", 0))
+        end = _format_ass_timestamp(segment.get("end", 0))
+        if end == start:
+            continue
+        dialogue_lines.append(
+            f"Dialogue: 0,{start},{end},Default,,0,0,0,,"
+            f"{{\\an5\\pos({x},{y})}}{text}"
+        )
+
+    ass_content = chr(10).join([
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        f"PlayResX: {width}",
+        f"PlayResY: {height}",
+        "ScaledBorderAndShadow: yes",
+        "WrapStyle: 0",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: Default,Arial,{ass_font_size},&H00{font_color},&H00{font_color},"
+        f"&H00{outline_color},&H00000000,0,0,0,0,100,100,0,0,1,"
+        f"{ass_outline_width},0,5,0,0,0,1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+        *dialogue_lines,
+        "",
+    ])
+    with open(ass_path, "w", encoding="utf-8") as ass_file:
+        ass_file.write(ass_content)
+    return ass_path
 
 
 def _coerce_bool(value: object, default: bool = False) -> bool:
@@ -214,37 +305,27 @@ def burn_subtitles_with_blur_mask(
             blur_height = 0
             blur_y = height
 
-        # Alignment=2 anchors the bottom edge of the text block at the margin,
-        # but the preview editor positions its draggable label by its center.
-        # Subtract half a line (the font's rendered em size) so the rendered
-        # text lands centered on the configured position.
-        rendered_text_height = font_size * height / ASS_PLAYRES_HEIGHT
-        desired_margin_px = max(
-            round(height * (1.0 - position_y) - rendered_text_height / 2),
-            1,
-        )
-
-        margin_v = max(
-            round(desired_margin_px * ASS_PLAYRES_HEIGHT / height),
-            1,
+        # The preview positions the draggable subtitle label by its center in
+        # top-down video coordinates. Render an ASS file with the exact frame
+        # as its script canvas and use an explicit center anchor so the same
+        # normalized point is used by the final video renderer.
+        ass_path = os.path.splitext(srt_path)[0] + ".ass"
+        _write_positioned_ass_subtitles(
+            srt_path=srt_path,
+            ass_path=ass_path,
+            video_width=width,
+            video_height=height,
+            font_size=font_size,
+            outline_width=outline_width,
+            font_color=font_color,
+            outline_color=outline_color,
+            position_y=position_y,
         )
 
         # Keep the filename inside quotes. This is required for Windows drive
         # letters and paths containing spaces; only the filter-level colon is escaped.
-        srt_escaped = _escape_ffmpeg_filter_path(srt_path)
-        force_style = ",".join([
-            "FontName=Arial",
-            f"FontSize={font_size}",
-            f"PrimaryColour=&H00{font_color}",
-            f"OutlineColour=&H00{outline_color}",
-            f"Outline={outline_width}",
-            "Alignment=2",
-            f"MarginV={margin_v}",
-        ])
-        subtitle_filter = (
-            f"subtitles=filename='{srt_escaped}':"
-            f"original_size={width}x{height}:force_style='{force_style}'"
-        )
+        ass_escaped = _escape_ffmpeg_filter_path(ass_path)
+        subtitle_filter = f"ass=filename='{ass_escaped}'"
 
         if blur_existing:
             # Only blur when the user confirms the source contains burned-in text.
@@ -272,9 +353,9 @@ def burn_subtitles_with_blur_mask(
 
         logger.info(
             f"Burning subtitles (blur_old={blur_existing}, font_size={font_size}, "
+            f"position_y={position_y:.4f}, ass_path={ass_path}, "
             f"blur_x={blur_x}, blur_y={blur_y}, blur_width={blur_width}, blur_height={blur_height}, "
-            f"blur_sigma={blur_strength}, "
-            f"blur_steps={blur_steps}, margin_v={margin_v}): {' '.join(cmd)}"
+            f"blur_sigma={blur_strength}, blur_steps={blur_steps}): {' '.join(cmd)}"
         )
         subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=600, **hidden_subprocess_kwargs())
         logger.info(f"Subtitle burn successful: {output_video}")

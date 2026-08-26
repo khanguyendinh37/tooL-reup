@@ -16,6 +16,7 @@ export interface DubbingResponse {
   error?: string | null
   result_path?: string | null
   thumbnail_path?: string | null
+  subtitle_config?: string | null
   processing_config?: string | null
   duration?: string | null
   file_size?: string | null

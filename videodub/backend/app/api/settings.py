@@ -23,6 +23,50 @@ router = APIRouter()
 DEFAULT_BLUR_HEIGHT_RATIO = 0.24
 DEFAULT_BLUR_STRENGTH = 34
 DEFAULT_BLUR_STEPS = 2
+DEFAULT_SUBTITLE_POSITION_Y = 0.94
+DEFAULT_BLUR_REGION = {
+    "x": 0.0,
+    "y": 0.76,
+    "width": 1.0,
+    "height": 0.24,
+}
+SUBTITLE_POSITION_Y_BY_PRESET = {
+    "top": 0.1,
+    "center": 0.5,
+    "bottom": DEFAULT_SUBTITLE_POSITION_Y,
+}
+
+
+def _clamp_unit(value: Any, default: float) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        numeric = default
+    if numeric != numeric:  # NaN
+        numeric = default
+    return min(max(numeric, 0.0), 1.0)
+
+
+def _normalize_blur_region(value: Any) -> Dict[str, float]:
+    if not isinstance(value, dict):
+        return dict(DEFAULT_BLUR_REGION)
+
+    width = min(max(_clamp_unit(value.get("width"), 1.0), 0.02), 1.0)
+    height = min(max(_clamp_unit(value.get("height"), 0.24), 0.02), 1.0)
+    x = min(_clamp_unit(value.get("x"), 0.0), 1.0 - width)
+    y = min(_clamp_unit(value.get("y"), 0.76), 1.0 - height)
+    return {"x": x, "y": y, "width": width, "height": height}
+
+
+def _position_y_from_config(config: Dict[str, Any], position: str) -> float:
+    raw_position_y = config.get("position_y")
+    if raw_position_y is None and (position == "custom" or config.get("use_custom_position")):
+        raw_position_y = config.get("custom_y")
+    return _clamp_unit(
+        raw_position_y,
+        SUBTITLE_POSITION_Y_BY_PRESET.get(position, DEFAULT_SUBTITLE_POSITION_Y),
+    )
+
 
 DEFAULT_SETTINGS = {
     "whisper_model": "small",
@@ -36,6 +80,7 @@ DEFAULT_SETTINGS = {
     "default_original_volume": "0.1",
     "subtitle_enabled": "false",
     "subtitle_position": "bottom",
+    "subtitle_position_y": str(DEFAULT_SUBTITLE_POSITION_Y),
     "subtitle_size": "small",
     "subtitle_color": "white",
     "blur_existing_subtitles": "false",
@@ -53,12 +98,14 @@ PRESET_KEY_PREFIX = "user_preset_"
 
 
 def _parse_subtitle_config(config_str: str) -> Dict[str, Any]:
-    """Parse subtitle config JSON string to dict with defaults."""
+    """Parse saved subtitle settings without losing custom coordinates."""
     defaults = {
         "position": "bottom",
+        "position_y": DEFAULT_SUBTITLE_POSITION_Y,
         "size": "small",
         "color": "white",
         "blur_existing_subtitles": False,
+        "blur_region": dict(DEFAULT_BLUR_REGION),
         "blur_height_ratio": DEFAULT_BLUR_HEIGHT_RATIO,
         "blur_strength": DEFAULT_BLUR_STRENGTH,
         "blur_steps": DEFAULT_BLUR_STEPS,
@@ -67,39 +114,53 @@ def _parse_subtitle_config(config_str: str) -> Dict[str, Any]:
         return defaults
     try:
         config = json.loads(config_str)
+        if not isinstance(config, dict):
+            return defaults
+
         # Subtitle rendering uses a fixed compact 13px size.
         size = "small"
+        position = str(config.get("position") or "bottom")
 
-        # Map font_color to color name
-        font_color = config.get("font_color", "#FFFFFF").upper().lstrip("#")
+        # Map font_color to color name. Accept the older color-name field too.
+        font_color = str(config.get("font_color", "#FFFFFF")).upper().lstrip("#")
         color_map_reverse = {
             "FFFFFF": "white",
             "FFD700": "yellow",
             "00FFFF": "cyan",
             "FF4444": "red",
         }
-        color = color_map_reverse.get(font_color, "white")
+        color = color_map_reverse.get(font_color, str(config.get("color") or "white"))
+        if color not in color_map_reverse.values():
+            color = "white"
 
         blur_existing = config.get("blur_existing_subtitles", False)
         if isinstance(blur_existing, str):
             blur_existing = blur_existing.lower() in {"1", "true", "yes", "on"}
 
         return {
-            "position": config.get("position", "bottom"),
+            "position": position,
+            "position_y": _position_y_from_config(config, position),
             "size": size,
             "color": color,
             "blur_existing_subtitles": bool(blur_existing),
+            "blur_region": _normalize_blur_region(config.get("blur_region")),
             "blur_height_ratio": DEFAULT_BLUR_HEIGHT_RATIO,
             "blur_strength": DEFAULT_BLUR_STRENGTH,
             "blur_steps": DEFAULT_BLUR_STEPS,
         }
-    except Exception:
+    except (TypeError, ValueError, json.JSONDecodeError):
         return defaults
 
 
-def _build_subtitle_config(position: str, size: str, color: str,
-                            blur_existing_subtitles: bool = False) -> str:
-    """Build subtitle config JSON string from individual settings."""
+def _build_subtitle_config(
+    position: str,
+    size: str,
+    color: str,
+    blur_existing_subtitles: bool = False,
+    position_y: Optional[float] = None,
+    blur_region: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Build subtitle settings while preserving the editor's custom geometry."""
     size_map = {"small": 13, "medium": 13, "large": 13}
     color_map = {
         "white": "#FFFFFF",
@@ -107,6 +168,13 @@ def _build_subtitle_config(position: str, size: str, color: str,
         "cyan": "#00FFFF",
         "red": "#FF4444",
     }
+    normalized_position = str(position or "bottom")
+    fallback_y = 0.9 if normalized_position == "custom" else SUBTITLE_POSITION_Y_BY_PRESET.get(
+        normalized_position,
+        DEFAULT_SUBTITLE_POSITION_Y,
+    )
+    normalized_y = _clamp_unit(position_y, fallback_y)
+    normalized_region = _normalize_blur_region(blur_region)
     config = {
         "enabled": True,
         "font_family": "Arial",
@@ -120,15 +188,17 @@ def _build_subtitle_config(position: str, size: str, color: str,
         "shadow_offset_y": 2,
         "back_color": "#E6E6E6",
         "back_opacity": 0.1,
-        "position": position,
+        "position": normalized_position,
+        "position_y": normalized_y,
         "margin_v": 20,
         "margin_l": 20,
         "margin_r": 20,
         "alignment": 2,
         "custom_x": 0.5,
-        "custom_y": 0.9,
-        "use_custom_position": False,
+        "custom_y": normalized_y,
+        "use_custom_position": normalized_position == "custom",
         "blur_existing_subtitles": blur_existing_subtitles,
+        "blur_region": normalized_region,
         "blur_height_ratio": DEFAULT_BLUR_HEIGHT_RATIO,
         "blur_strength": DEFAULT_BLUR_STRENGTH,
         "blur_steps": DEFAULT_BLUR_STEPS,
@@ -151,9 +221,11 @@ class SettingsUpdate(BaseModel):
     default_original_volume: Optional[float] = None
     subtitle_enabled: Optional[bool] = None
     subtitle_position: Optional[str] = None
+    subtitle_position_y: Optional[float] = None
     subtitle_size: Optional[str] = None
     subtitle_color: Optional[str] = None
     blur_existing_subtitles: Optional[bool] = None
+    blur_region: Optional[Dict[str, Any]] = None
     translation_provider: Optional[str] = None
     translation_model: Optional[str] = None
     translation_endpoint: Optional[str] = None
@@ -245,9 +317,11 @@ async def get_settings(session: AsyncSession = Depends(get_session)):
     if "default_subtitle_config" in settings:
         subtitle_config = _parse_subtitle_config(settings["default_subtitle_config"])
         settings["subtitle_position"] = subtitle_config["position"]
+        settings["subtitle_position_y"] = subtitle_config["position_y"]
         settings["subtitle_size"] = subtitle_config["size"]
         settings["subtitle_color"] = subtitle_config["color"]
         settings["blur_existing_subtitles"] = subtitle_config["blur_existing_subtitles"]
+        settings["blur_region"] = subtitle_config["blur_region"]
 
     return settings
 
@@ -286,8 +360,8 @@ async def update_settings(update: SettingsUpdate, session: AsyncSession = Depend
 
     # If subtitle individual keys are provided, also update default_subtitle_config
     subtitle_keys = {
-        "subtitle_position", "subtitle_size", "subtitle_color",
-        "subtitle_enabled", "blur_existing_subtitles",
+        "subtitle_position", "subtitle_position_y", "subtitle_size", "subtitle_color",
+        "subtitle_enabled", "blur_existing_subtitles", "blur_region",
     }
     has_subtitle_update = any(k in updates for k in subtitle_keys)
 
@@ -300,15 +374,25 @@ async def update_settings(update: SettingsUpdate, session: AsyncSession = Depend
         current_config_str = existing_config.value if existing_config else "{}"
         current_config = _parse_subtitle_config(current_config_str)
 
-        # Update with new values
+        # Update with new values. A preset change moves the subtitle unless an
+        # explicit editor coordinate is included in the same request.
         if "subtitle_position" in updates:
             current_config["position"] = updates["subtitle_position"]
+            if "subtitle_position_y" not in updates and current_config["position"] != "custom":
+                current_config["position_y"] = SUBTITLE_POSITION_Y_BY_PRESET.get(
+                    current_config["position"],
+                    DEFAULT_SUBTITLE_POSITION_Y,
+                )
+        if "subtitle_position_y" in updates:
+            current_config["position_y"] = updates["subtitle_position_y"]
         if "subtitle_size" in updates:
             current_config["size"] = updates["subtitle_size"]
         if "subtitle_color" in updates:
             current_config["color"] = updates["subtitle_color"]
         if "blur_existing_subtitles" in updates:
             current_config["blur_existing_subtitles"] = updates["blur_existing_subtitles"]
+        if "blur_region" in updates:
+            current_config["blur_region"] = updates["blur_region"]
 
         # Build and save default_subtitle_config
         new_config_str = _build_subtitle_config(
@@ -316,6 +400,8 @@ async def update_settings(update: SettingsUpdate, session: AsyncSession = Depend
             current_config["size"],
             current_config["color"],
             current_config["blur_existing_subtitles"],
+            position_y=current_config.get("position_y"),
+            blur_region=current_config.get("blur_region"),
         )
 
         if existing_config:
@@ -364,6 +450,11 @@ async def update_settings(update: SettingsUpdate, session: AsyncSession = Depend
                 session.add(AppSettings(key=key, value=value))
 
     for key, value in updates.items():
+        # These two values live inside default_subtitle_config. Do not write a
+        # Python dict string to separate rows that the GET endpoint could later
+        # mistake for the canonical editor state.
+        if key in {"subtitle_position_y", "blur_region"}:
+            continue
         result = await session.execute(
             select(AppSettings).where(AppSettings.key == key)
         )

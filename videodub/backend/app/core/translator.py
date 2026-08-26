@@ -21,6 +21,14 @@ MARKER_RE = re.compile(r"<<<\d+>>>")
 CONTEXT_CHUNK_SIZE = 8
 CONTEXT_MAX_GAP_SECONDS = 2.0
 CONTEXT_MAX_CHARS = 2600
+# A usable AI route first translates the whole SRT in a single request so the
+# model carries tone, names, and terminology across the entire video. The
+# timeout scales with cue count because one long generation replaces many
+# small ones.
+FULL_PASS_TIMEOUT_BASE_SECONDS = 90
+FULL_PASS_TIMEOUT_PER_CUE_SECONDS = 2
+FULL_PASS_TIMEOUT_CAP_SECONDS = 600
+GROUP_AI_TIMEOUT_SECONDS = 45
 GOOGLE_MAX_RETRIES = 1
 GOOGLE_REQUEST_TIMEOUT_SECONDS = 10
 GOOGLE_CIRCUIT_COOLDOWN_SECONDS = 30
@@ -304,6 +312,33 @@ def _build_contextual_block(entries: list, indices: Iterable[int] | int,
     return "\n".join(parts)
 
 
+def _full_pass_timeout_seconds(cue_count: int) -> int:
+    estimate = FULL_PASS_TIMEOUT_BASE_SECONDS + cue_count * FULL_PASS_TIMEOUT_PER_CUE_SECONDS
+    return min(estimate, FULL_PASS_TIMEOUT_CAP_SECONDS)
+
+
+def _translate_whole_file_with_ai(
+    entries: list,
+    translatable_indices: list[int],
+    source: str,
+    target: str,
+    translation_config: TranslationConfig,
+) -> Optional[dict[int, str]]:
+    """One full-context AI pass over every cue, or None if it is not trustworthy."""
+    block = _build_contextual_block(entries, translatable_indices)
+    result = translate_marked_block(
+        translation_config,
+        block,
+        source,
+        target,
+        timeout_seconds=_full_pass_timeout_seconds(len(translatable_indices)),
+    )
+    translations = _extract_marked_translations(result or "", translatable_indices)
+    if not translations or not _translations_are_meaningful(entries, translations):
+        return None
+    return translations
+
+
 def _extract_marked_translations(result: str, indices: Iterable[int]) -> Optional[dict[int, str]]:
     """Return translations only when every requested marker is preserved exactly once."""
     if not result:
@@ -435,7 +470,13 @@ def _translate_marked_group(
     """Try the configured AI route first, then the reliable Google fallback."""
     block = _build_contextual_block(entries, indices)
     if translation_config and translation_config.is_usable:
-        ai_result = translate_marked_block(translation_config, block, src, dest)
+        ai_result = translate_marked_block(
+            translation_config,
+            block,
+            src,
+            dest,
+            timeout_seconds=GROUP_AI_TIMEOUT_SECONDS,
+        )
         ai_translations = _extract_marked_translations(ai_result or "", indices)
         if ai_translations and _translations_are_meaningful(entries, ai_translations):
             return ai_translations
@@ -493,12 +534,14 @@ def translate_srt_deep_translator(
     source_lang: Optional[str] = None,
     translation_config: TranslationConfig | None = None,
 ) -> str:
-    """Translate an SRT with optional AI context and a per-block Google fallback.
+    """Translate an SRT with full-file AI context and a per-block fallback chain.
 
-    The selected source language is preferred over character-based detection.
-    Each marked block is accepted only when every marker is preserved exactly
-    once, preventing line shifts or partial translations from corrupting SRT
-    timing. Failed AI/Google blocks fall back to smaller blocks, then neighbor
+    A verified AI route first receives the entire subtitle file in one request,
+    so tone, names, and terminology stay consistent across the whole video. Each
+    marked block is accepted only when every marker is preserved exactly once,
+    preventing line shifts or partial translations from corrupting SRT timing.
+    When the full pass (or a later AI block) fails, translation degrades to the
+    contextual groups of the Google route, then smaller blocks, then neighbor
     context, then the original cue text.
     """
     entries = parse_srt(srt_path)
@@ -522,6 +565,33 @@ def translate_srt_deep_translator(
             entry["translated_text"] = _clean_subtitle_text(entry.get("original_text", ""))
         _write_srt(entries, output_path)
         return output_path
+
+    translatable_indices = [
+        index for index, entry in enumerate(entries)
+        if _clean_subtitle_text(entry.get("original_text", ""))
+    ]
+
+    if translation_config and translation_config.is_usable and translatable_indices:
+        whole_file_translations = _translate_whole_file_with_ai(
+            entries,
+            translatable_indices,
+            source,
+            target,
+            translation_config,
+        )
+        if whole_file_translations:
+            for index, translated in whole_file_translations.items():
+                entries[index]["translated_text"] = translated
+            logger.info(
+                "AI route %s translated all %s cues in one full-context pass",
+                translation_config.provider,
+                len(translatable_indices),
+            )
+            _write_srt(entries, output_path)
+            return output_path
+        logger.warning(
+            "Full-context AI pass was unavailable or incomplete; falling back to grouped translation"
+        )
 
     translated_indices: set[int] = set()
     fallback_indices: set[int] = set()

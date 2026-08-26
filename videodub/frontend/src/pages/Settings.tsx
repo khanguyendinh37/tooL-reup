@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Settings2, Mic2, Globe, Volume2, Save, RotateCcw, CheckCircle2, Cookie, Upload, Trash2, Bell, FileText } from 'lucide-react'
+import { Settings2, Mic2, Globe, Volume2, Save, RotateCcw, CheckCircle2, Cookie, Upload, Trash2, Bell } from 'lucide-react'
 import { WHISPER_MODELS, TTS_VOICES, LANGUAGES } from '@/lib/utils'
 import { getAllCookiesStatus, uploadCookies, deleteCookies, getSettings, testTranslationConnection, updateSettings } from '@/lib/api'
 import TranslationAiRoute from '@/components/settings/TranslationAiRoute'
@@ -22,11 +22,6 @@ interface AppSettings {
   default_dubbing_volume: number
   default_background_volume: number
   default_original_volume: number
-  subtitle_enabled: boolean | string
-  subtitle_position?: string
-  subtitle_size?: string
-  subtitle_color?: string
-  blur_existing_subtitles: boolean | string
   translation_provider?: TranslationProviderId
   translation_model?: string
   translation_endpoint?: string
@@ -53,11 +48,6 @@ export default function Settings() {
   const [dubbingVolume, setDubbingVolume] = useState(2.0)
   const [backgroundVolume, setBackgroundVolume] = useState(1.0)
   const [originalVocalsVolume, setOriginalVocalsVolume] = useState(0.1)
-  const [subtitleEnabled, setSubtitleEnabled] = useState(false)
-  const [subtitlePosition, setSubtitlePosition] = useState('bottom')
-  const [subtitleSize, setSubtitleSize] = useState('small')
-  const [subtitleColor, setSubtitleColor] = useState('white')
-  const [blurExistingSubtitles, setBlurExistingSubtitles] = useState(false)
   const [translationProvider, setTranslationProvider] = useState<TranslationProviderId>('google')
   const [translationModel, setTranslationModel] = useState('google-free')
   const [translationEndpoint, setTranslationEndpoint] = useState('')
@@ -89,16 +79,6 @@ export default function Settings() {
       setDubbingVolume(parseFloat(String(settings.default_dubbing_volume ?? 2.0)))
       setBackgroundVolume(parseFloat(String(settings.default_background_volume ?? 1.0)))
       setOriginalVocalsVolume(parseFloat(String(settings.default_original_volume ?? 0.1)))
-      setSubtitleEnabled(settings.subtitle_enabled === true || settings.subtitle_enabled === 'true')
-      const subPos = settings.subtitle_position ?? 'bottom'
-      const subSize = settings.subtitle_size ?? 'small'
-      const subColor = settings.subtitle_color ?? 'white'
-      setSubtitlePosition(subPos)
-      setSubtitleSize(subSize)
-      setSubtitleColor(subColor)
-      setBlurExistingSubtitles(
-        settings.blur_existing_subtitles === true || settings.blur_existing_subtitles === 'true'
-      )
       setTranslationProvider((settings.translation_provider as TranslationProviderId) || 'google')
       setTranslationModel(settings.translation_model || getTranslationProvider(settings.translation_provider).defaultModel)
       setTranslationEndpoint(settings.translation_endpoint || '')
@@ -148,11 +128,6 @@ export default function Settings() {
         default_dubbing_volume: dubbingVolume,
         default_background_volume: backgroundVolume,
         default_original_volume: originalVocalsVolume,
-        subtitle_enabled: subtitleEnabled,
-        subtitle_position: subtitlePosition,
-        subtitle_size: subtitleSize,
-        subtitle_color: subtitleColor,
-        blur_existing_subtitles: blurExistingSubtitles,
         translation_provider: translationProvider,
         translation_model: translationModel,
         translation_endpoint: translationEndpoint,
@@ -236,11 +211,6 @@ export default function Settings() {
     setDubbingVolume(1.0)
     setBackgroundVolume(1.0)
     setOriginalVocalsVolume(0.3)
-    setSubtitleEnabled(false)
-    setSubtitlePosition('bottom')
-    setSubtitleSize('small')
-    setSubtitleColor('white')
-    setBlurExistingSubtitles(false)
     setTranslationProvider('google')
     setTranslationModel('google-free')
     setTranslationEndpoint('')
@@ -265,11 +235,6 @@ export default function Settings() {
         default_dubbing_volume: 1.0,
         default_background_volume: 1.0,
         default_original_volume: 0.3,
-        subtitle_enabled: false,
-        subtitle_position: 'bottom',
-        subtitle_size: 'small',
-        subtitle_color: 'white',
-        blur_existing_subtitles: false,
         translation_provider: 'google',
         translation_model: 'google-free',
         translation_endpoint: '',
@@ -444,105 +409,6 @@ export default function Settings() {
             />
           </div>
         </div>
-      </div>
-
-      {/* Subtitle Settings */}
-      <div className="glass-card">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="w-10 h-10 rounded-xl bg-primary-500/20 flex items-center justify-center">
-            <FileText className="w-5 h-5 text-primary-400" />
-          </div>
-          <div>
-            <h3 className="font-semibold text-surface-100">Phụ đề</h3>
-            <p className="text-sm text-surface-500">Chèn phụ đề đã dịch vào video lồng tiếng</p>
-          </div>
-        </div>
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <p className="font-medium text-surface-100">Thêm phụ đề vào video</p>
-            <p className="text-sm text-surface-500">Chèn phụ đề 13 px; có thể làm mờ toàn bộ dải phụ đề cũ phía dưới</p>
-          </div>
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input
-              type="checkbox"
-              checked={subtitleEnabled}
-              onChange={(e) => setSubtitleEnabled(e.target.checked)}
-              className="sr-only peer"
-            />
-            <div className="w-11 h-6 bg-surface-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-primary-500/30 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600"></div>
-          </label>
-        </div>
-        <div className="flex items-center justify-between mt-4 pt-4 border-t border-surface-700/50">
-          <div>
-            <label htmlFor="settings-blur-existing-subtitles" className="font-medium text-surface-100 cursor-pointer">
-              Video có phụ đề cũ đã in sẵn
-            </label>
-            <p id="settings-blur-existing-subtitles-help" className="text-sm text-surface-500">
-              Làm mờ toàn bộ dải phụ đề cũ phía dưới trước khi chèn phụ đề mới 13 px
-            </p>
-          </div>
-          <input
-            id="settings-blur-existing-subtitles"
-            type="checkbox"
-            checked={blurExistingSubtitles}
-            onChange={(e) => setBlurExistingSubtitles(e.target.checked)}
-            disabled={!subtitleEnabled}
-            aria-describedby="settings-blur-existing-subtitles-help"
-            className="w-4 h-4 rounded accent-primary-500 disabled:opacity-40"
-          />
-        </div>
-        {subtitleEnabled && (
-          <div className="pt-4 border-t border-surface-700/50 space-y-4">
-            <div>
-              <label className="text-sm text-surface-400 mb-2 block">Vị trí phụ đề</label>
-              <div className="flex gap-2">
-                {['top', 'center', 'bottom'].map((pos) => (
-                  <button
-                    key={pos}
-                    onClick={() => setSubtitlePosition(pos)}
-                    className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-all ${
-                      subtitlePosition === pos
-                        ? 'bg-primary-500/20 text-primary-400 border border-primary-500/30'
-                        : 'bg-surface-800 text-surface-400 border border-surface-700 hover:border-surface-600'
-                    }`}
-                  >
-                    {pos === 'top' ? '👆 Trên' : pos === 'center' ? '⬜ Giữa' : '⬇️ Dưới'}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div>
-              <label className="text-sm text-surface-400 mb-2 block">Kích thước chữ</label>
-              <div className="py-2 px-3 rounded-lg text-sm font-medium text-primary-400 border border-primary-500/30 bg-primary-500/10">
-                13 px (cố định, phù hợp vùng phụ đề phía dưới)
-              </div>
-            </div>
-            <div>
-              <label className="text-sm text-surface-400 mb-2 block">Màu chữ</label>
-              <div className="flex gap-2">
-                {[
-                  { value: 'white', label: 'Trắng', color: '#FFFFFF' },
-                  { value: 'yellow', label: 'Vàng', color: '#FFD700' },
-                  { value: 'cyan', label: 'Xanh', color: '#00FFFF' },
-                  { value: 'red', label: 'Đỏ', color: '#FF4444' },
-                ].map((c) => (
-                  <button
-                    key={c.value}
-                    onClick={() => setSubtitleColor(c.value)}
-                    className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2 ${
-                      subtitleColor === c.value
-                        ? 'bg-primary-500/20 text-primary-400 border border-primary-500/30'
-                        : 'bg-surface-800 text-surface-400 border border-surface-700 hover:border-surface-600'
-                    }`}
-                  >
-                    <span className="w-3 h-3 rounded-full" style={{ backgroundColor: c.color }} />
-                    {c.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* TTS Settings */}

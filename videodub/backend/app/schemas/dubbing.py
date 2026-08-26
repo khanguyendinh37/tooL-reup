@@ -38,6 +38,7 @@ class DubbingResponse(BaseModel):
     error: Optional[str] = None
     result_path: Optional[str] = None
     thumbnail_path: Optional[str] = None
+    subtitle_config: Optional[str] = None
     processing_config: Optional[str] = None
     duration: Optional[str] = None
     file_size: Optional[str] = None

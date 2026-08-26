@@ -1,4 +1,6 @@
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from app.core.translation_config import (
@@ -7,7 +9,42 @@ from app.core.translation_config import (
     validate_translation_config,
 )
 from app.core.translation_providers import translate_marked_block
-from app.core.translator import _translate_marked_group
+from app.core.translator import (
+    _full_pass_timeout_seconds,
+    _translate_marked_group,
+    translate_srt_deep_translator,
+)
+
+
+SAMPLE_SRT = """1
+00:00:00,000 --> 00:00:01,000
+Hello one
+
+2
+00:00:05,000 --> 00:00:06,000
+Hello two
+
+3
+00:00:12,000 --> 00:00:13,000
+Hello three
+"""
+
+
+def _gemini_config() -> TranslationConfig:
+    return TranslationConfig(
+        provider="gemini",
+        model="gemini-2.0-flash",
+        endpoint="https://example.test/v1beta",
+        api_key="test-gemini-key",
+        verified=True,
+    )
+
+
+def _write_sample_srt(directory: str) -> tuple[str, str]:
+    srt_path = str(Path(directory) / "input.srt")
+    output_path = str(Path(directory) / "translated.srt")
+    Path(srt_path).write_text(SAMPLE_SRT, encoding="utf-8")
+    return srt_path, output_path
 
 
 class TranslationProviderTests(unittest.TestCase):
@@ -132,6 +169,63 @@ class TranslationProviderTests(unittest.TestCase):
 
         self.assertEqual(result, {0: "Xin chào"})
         ai.assert_not_called()
+
+
+class FullContextTranslationTests(unittest.TestCase):
+    def test_full_pass_timeout_scales_with_cue_count_and_is_capped(self):
+        self.assertEqual(_full_pass_timeout_seconds(3), 96)
+        self.assertEqual(_full_pass_timeout_seconds(100000), 600)
+
+    def test_usable_ai_route_translates_the_whole_file_in_one_request(self):
+        config = _gemini_config()
+        with tempfile.TemporaryDirectory() as directory:
+            srt_path, output_path = _write_sample_srt(directory)
+            with patch(
+                "app.core.translator.translate_marked_block",
+                return_value=(
+                    "<<<0>>> Xin chào một\n<<<1>>> Xin chào hai\n<<<2>>> Xin chào ba"
+                ),
+            ) as ai, patch("app.core.translator._translate_with_retry") as google:
+                translate_srt_deep_translator(srt_path, "vi", output_path, "en", config)
+
+            ai.assert_called_once()
+            block = ai.call_args.args[1]
+            for marker in ("<<<0>>>", "<<<1>>>", "<<<2>>>"):
+                self.assertIn(marker, block)
+            # The cues sit more than two seconds apart, so only a full-context
+            # request can cover all three in a single call.
+            self.assertEqual(ai.call_args.kwargs["timeout_seconds"], 96)
+            google.assert_not_called()
+            translated = Path(output_path).read_text(encoding="utf-8")
+            for line in ("Xin chào một", "Xin chào hai", "Xin chào ba"):
+                self.assertIn(line, translated)
+
+    def test_failed_full_pass_falls_back_to_grouped_translation(self):
+        config = _gemini_config()
+
+        def fake_translate(block_block_config, block, source, target, timeout_seconds=20):
+            markers = ["<<<0>>>", "<<<1>>>", "<<<2>>>"]
+            if sum(marker in block for marker in markers) >= 3:
+                return ""  # Full-context attempt failed.
+            lines = []
+            for marker in markers:
+                if marker in block:
+                    number = markers.index(marker) + 1
+                    lines.append(f"{marker} Xin chào {['một', 'hai', 'ba'][number - 1]}")
+            return "\n".join(lines)
+
+        with tempfile.TemporaryDirectory() as directory:
+            srt_path, output_path = _write_sample_srt(directory)
+            with patch(
+                "app.core.translator.translate_marked_block",
+                side_effect=fake_translate,
+            ), patch("app.core.translator._translate_with_retry") as google:
+                translate_srt_deep_translator(srt_path, "vi", output_path, "en", config)
+
+            google.assert_not_called()
+            translated = Path(output_path).read_text(encoding="utf-8")
+            for line in ("Xin chào một", "Xin chào hai", "Xin chào ba"):
+                self.assertIn(line, translated)
 
     def test_openai_discovery_filters_and_normalizes_models(self):
         from app.core.translation_providers import discover_translation_models

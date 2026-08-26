@@ -109,6 +109,7 @@ export interface WorkflowJobLike {
   status: string
   progress: number
   error?: string | null
+  subtitle_config?: string | null
   processing_config?: string | null
   created_at: string
   updated_at: string
@@ -199,52 +200,72 @@ export function workflowFromJob(
   const status = normalizeJobStatus(job.status)
   let savedForm: Partial<WorkflowFormValues> = {}
 
+  let processingConfig: {
+    tts_speed?: number
+    subtitle_config?: {
+      enabled?: boolean
+      position?: string
+      position_y?: number
+      custom_y?: number
+      font_color?: string
+      blur_existing_subtitles?: boolean
+      blur_region?: BlurRegion
+    } | null
+    audio_config?: {
+      dubbing_volume?: number
+      background_volume?: number
+      original_vocals_volume?: number
+    } | null
+  } | null = null
+
   if (job.processing_config) {
     try {
-      const config = JSON.parse(job.processing_config) as {
-        tts_speed?: number
-        subtitle_config?: {
-          enabled?: boolean
-          position_y?: number
-          font_color?: string
-          blur_existing_subtitles?: boolean
-          blur_region?: BlurRegion
-        } | null
-        audio_config?: {
-          dubbing_volume?: number
-          background_volume?: number
-          original_vocals_volume?: number
-        } | null
-      }
-      const subtitle = config.subtitle_config
-      const positionY = typeof subtitle?.position_y === 'number'
-        ? clampUnit(subtitle.position_y)
-        : subtitleYForPreset('bottom')
-      const position = subtitlePresetForY(positionY)
-      const savedBlurRegion = subtitle?.blur_region && typeof subtitle.blur_region === 'object'
-        ? clampBlurRegion(subtitle.blur_region as BlurRegion)
-        : DEFAULT_BLUR_REGION
-      const color = subtitle?.font_color?.toUpperCase() === '#FFD700'
-        ? 'yellow'
-        : subtitle?.font_color?.toUpperCase() === '#00FFFF'
-          ? 'cyan'
-          : subtitle?.font_color?.toUpperCase() === '#FF4444'
-            ? 'red'
-            : 'white'
-      savedForm = {
-        ttsSpeed: config.tts_speed,
-        subtitleEnabled: subtitle?.enabled,
-        subtitlePosition: position,
-        subtitlePositionY: positionY,
-        subtitleColor: color,
-        blurExistingSubtitles: subtitle?.blur_existing_subtitles,
-        blurRegion: savedBlurRegion,
-        dubbingVolume: config.audio_config?.dubbing_volume,
-        backgroundVolume: config.audio_config?.background_volume,
-        originalVocalsVolume: config.audio_config?.original_vocals_volume,
-      }
+      processingConfig = JSON.parse(job.processing_config)
     } catch {
-      // Older jobs may not have a valid saved configuration; use safe defaults.
+      // Older jobs may not have a valid processing snapshot.
+    }
+  }
+
+  let subtitleConfig = processingConfig?.subtitle_config || null
+  if (!subtitleConfig && job.subtitle_config) {
+    try {
+      subtitleConfig = JSON.parse(job.subtitle_config)
+    } catch {
+      // Fall back to the local form/defaults when the saved subtitle JSON is invalid.
+    }
+  }
+
+  if (subtitleConfig || processingConfig) {
+    const savedPosition = subtitleConfig?.position || 'bottom'
+    const rawPositionY = subtitleConfig?.position_y ?? subtitleConfig?.custom_y
+    const positionY = typeof rawPositionY === 'number'
+      ? clampUnit(rawPositionY)
+      : subtitleYForPreset(savedPosition)
+    const position = subtitleConfig?.position === 'custom'
+      ? 'custom'
+      : subtitlePresetForY(positionY)
+    const savedBlurRegion = subtitleConfig?.blur_region && typeof subtitleConfig.blur_region === 'object'
+      ? clampBlurRegion(subtitleConfig.blur_region as BlurRegion)
+      : DEFAULT_BLUR_REGION
+    const fontColor = subtitleConfig?.font_color?.toUpperCase()
+    const color = fontColor === '#FFD700'
+      ? 'yellow'
+      : fontColor === '#00FFFF'
+        ? 'cyan'
+        : fontColor === '#FF4444'
+          ? 'red'
+          : 'white'
+    savedForm = {
+      ttsSpeed: processingConfig?.tts_speed,
+      subtitleEnabled: subtitleConfig?.enabled,
+      subtitlePosition: position,
+      subtitlePositionY: positionY,
+      subtitleColor: color,
+      blurExistingSubtitles: subtitleConfig?.blur_existing_subtitles,
+      blurRegion: savedBlurRegion,
+      dubbingVolume: processingConfig?.audio_config?.dubbing_volume,
+      backgroundVolume: processingConfig?.audio_config?.background_volume,
+      originalVocalsVolume: processingConfig?.audio_config?.original_vocals_volume,
     }
   }
 

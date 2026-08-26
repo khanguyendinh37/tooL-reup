@@ -79,13 +79,17 @@ def _map_subtitle_config(frontend_cfg: Optional[dict]) -> Optional[dict]:
 
     position = frontend_cfg.get("position", "bottom")
     color = frontend_cfg.get("color", "white")
-    position_y = _clamp_unit(frontend_cfg.get("position_y"), position_map.get(position, position_map["bottom"]))
+    raw_position_y = frontend_cfg.get("position_y")
+    if raw_position_y is None and position == "custom":
+        raw_position_y = frontend_cfg.get("custom_y")
+    position_y = _clamp_unit(raw_position_y, position_map.get(position, position_map["bottom"]))
     blur_existing = frontend_cfg.get("blur_existing_subtitles", False)
     if isinstance(blur_existing, str):
         blur_existing = blur_existing.lower() in {"1", "true", "yes", "on"}
 
     return {
         "enabled": True,
+        "position": position,
         # Keep the rendered subtitle deliberately compact as requested.
         "font_size": 13,
         "font_color": color_map.get(color, color_map["white"]),

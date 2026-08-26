@@ -355,13 +355,20 @@ export default function Dubbing() {
           setWhisperModel(settings.whisper_model || 'small')
           setTtsSpeed(parseFloat(settings.tts_speed || '1.0'))
           setSubtitleEnabled(settings.subtitle_enabled === 'true' || settings.subtitle_enabled === true)
-          setSubtitlePosition(settings.subtitle_position || 'bottom')
-          setSubtitlePositionY(subtitleYForPreset(settings.subtitle_position || 'bottom'))
+          const savedPosition = settings.subtitle_position || 'bottom'
+          const savedPositionY = Number(settings.subtitle_position_y)
+          setSubtitlePosition(savedPosition)
+          setSubtitlePositionY(Number.isFinite(savedPositionY)
+            ? Math.min(Math.max(savedPositionY, 0), 1)
+            : subtitleYForPreset(savedPosition))
           setSubtitleSize(settings.subtitle_size || 'small')
           setSubtitleColor(settings.subtitle_color || 'white')
           setBlurExistingSubtitles(
             settings.blur_existing_subtitles === 'true' || settings.blur_existing_subtitles === true
           )
+          if (settings.blur_region && typeof settings.blur_region === 'object') {
+            setBlurRegion(clampBlurRegion(settings.blur_region))
+          }
           setDubbingVolume(parseFloat(String(settings.default_dubbing_volume ?? 2.0)))
           setBackgroundVolume(parseFloat(String(settings.default_background_volume ?? 1.0)))
           setOriginalVocalsVolume(parseFloat(String(settings.default_original_volume ?? 0.1)))
@@ -414,9 +421,11 @@ export default function Dubbing() {
         tts_speed: ttsSpeed.toString(), notifications_enabled: notificationsEnabled,
         subtitle_enabled: subtitleEnabled,
         subtitle_position: subtitlePosition,
+        subtitle_position_y: subtitlePositionY,
         subtitle_size: subtitleSize,
         subtitle_color: subtitleColor,
         blur_existing_subtitles: blurExistingSubtitles,
+        blur_region: blurRegion,
         default_dubbing_volume: dubbingVolume,
         default_background_volume: backgroundVolume,
         default_original_volume: originalVocalsVolume,

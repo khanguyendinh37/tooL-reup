@@ -43,6 +43,7 @@ def _request_json(
     url: str,
     payload: dict[str, Any],
     headers: dict[str, str],
+    timeout_seconds: int = AI_TRANSLATION_TIMEOUT_SECONDS,
 ) -> dict[str, Any] | None:
     """POST JSON while keeping headers, API keys, and response bodies out of logs."""
     request = Request(
@@ -52,7 +53,7 @@ def _request_json(
         method="POST",
     )
     try:
-        with urlopen(request, timeout=AI_TRANSLATION_TIMEOUT_SECONDS) as response:
+        with urlopen(request, timeout=timeout_seconds) as response:
             raw = response.read().decode("utf-8")
         parsed = json.loads(raw)
         return parsed if isinstance(parsed, dict) else None
@@ -201,6 +202,7 @@ def _translate_openai_compatible(
     block: str,
     source: str,
     target: str,
+    timeout_seconds: int = AI_TRANSLATION_TIMEOUT_SECONDS,
 ) -> str | None:
     endpoint = (config.endpoint or config.spec.default_endpoint).rstrip("/")
     if not endpoint:
@@ -214,6 +216,7 @@ def _translate_openai_compatible(
             "temperature": 0.1,
         },
         {"Authorization": f"Bearer {config.api_key}"},
+        timeout_seconds,
     )
     return _extract_openai_content(data) if data else None
 
@@ -239,6 +242,7 @@ def _translate_gemini(
     block: str,
     source: str,
     target: str,
+    timeout_seconds: int = AI_TRANSLATION_TIMEOUT_SECONDS,
 ) -> str | None:
     endpoint = (config.endpoint or config.spec.default_endpoint).rstrip("/")
     if not endpoint or not config.api_key:
@@ -262,6 +266,7 @@ def _translate_gemini(
             "generationConfig": {"temperature": 0.1},
         },
         {"x-goog-api-key": config.api_key},
+        timeout_seconds,
     )
     return _extract_gemini_content(data) if data else None
 
@@ -284,16 +289,20 @@ def _translate_anthropic(
     block: str,
     source: str,
     target: str,
+    timeout_seconds: int = AI_TRANSLATION_TIMEOUT_SECONDS,
 ) -> str | None:
     endpoint = (config.endpoint or config.spec.default_endpoint).rstrip("/")
     if not endpoint or not config.api_key:
         return None
+    # The output must hold every translated cue of the passage, so the token
+    # budget scales with its size instead of clipping long files mid-response.
+    max_tokens = min(8192, max(2048, len(block) // 2))
     data = _request_json(
         config.provider,
         f"{endpoint}/v1/messages",
         {
             "model": config.model,
-            "max_tokens": 2048,
+            "max_tokens": max_tokens,
             "temperature": 0.1,
             "system": TRANSLATION_SYSTEM_PROMPT,
             "messages": [{
@@ -309,6 +318,7 @@ def _translate_anthropic(
             "x-api-key": config.api_key,
             "anthropic-version": "2023-06-01",
         },
+        timeout_seconds,
     )
     return _extract_anthropic_content(data) if data else None
 
@@ -318,17 +328,18 @@ def translate_marked_block(
     block: str,
     source: str,
     target: str,
+    timeout_seconds: int = AI_TRANSLATION_TIMEOUT_SECONDS,
 ) -> str | None:
     """Translate one marked block, returning None for any provider failure."""
     if not config.is_usable:
         return None
     try:
         if config.spec.family == "openai_compatible":
-            return _translate_openai_compatible(config, block, source, target)
+            return _translate_openai_compatible(config, block, source, target, timeout_seconds)
         if config.spec.family == "gemini":
-            return _translate_gemini(config, block, source, target)
+            return _translate_gemini(config, block, source, target, timeout_seconds)
         if config.spec.family == "anthropic":
-            return _translate_anthropic(config, block, source, target)
+            return _translate_anthropic(config, block, source, target, timeout_seconds)
     except Exception:
         logger.warning("AI provider %s adapter failed", config.provider)
     return None

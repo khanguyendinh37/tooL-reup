@@ -1,5 +1,7 @@
 import { useNavigate } from 'react-router-dom'
 import { Mic2, Zap, Globe, Clock, ArrowRight, Video, Languages, Volume2 } from 'lucide-react'
+import BrandMark from '@/components/brand/BrandMark'
+import { PIPELINE_STEPS } from '@/lib/workflow'
 
 const features = [
   {
@@ -44,9 +46,7 @@ export default function Dashboard() {
       <div className="glass-card !p-12 text-center relative overflow-hidden">
         <div className="absolute inset-0 bg-gradient-to-r from-primary-600/10 via-accent-cyan/10 to-accent-purple/10" />
         <div className="relative z-10">
-          <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-primary-500 to-accent-cyan flex items-center justify-center animate-float">
-            <Mic2 className="w-10 h-10 text-white" />
-          </div>
+          <BrandMark size="lg" className="mx-auto mb-6 animate-float" />
           <h1 className="text-4xl font-bold mb-4">
             <span className="gradient-text">VideoDub</span>
           </h1>
@@ -100,13 +100,13 @@ export default function Dashboard() {
           Quy trình tự động
         </h3>
         <div className="flex items-center justify-between flex-wrap gap-4">
-          {['Tải video', 'Tạo SRT', 'Dịch thuật', 'Tạo giọng', 'Xóa giọng gốc', 'Ghép video'].map(
+          {PIPELINE_STEPS.map(
             (step, i) => (
-              <div key={step} className="flex items-center gap-2">
+              <div key={step.id} className="flex items-center gap-2">
                 <div className="w-8 h-8 rounded-lg bg-primary-600/20 border border-primary-500/30 flex items-center justify-center text-sm font-medium text-primary-400">
                   {i + 1}
                 </div>
-                <span className="text-sm text-surface-300">{step}</span>
+                <span className="text-sm text-surface-300">{step.label}</span>
                 {i < 5 && <ArrowRight className="w-4 h-4 text-surface-600 hidden md:block" />}
               </div>
             )

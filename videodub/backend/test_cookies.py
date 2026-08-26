@@ -68,6 +68,7 @@ live.douyin.com    FALSE    /    TRUE    0    csrf_session_id    01a13c3a155664f
 .douyin.com    TRUE    /    FALSE    1816002132    __druidClientInfo    JTdCJTIyY2xpZW50V2lkdGglMjIlM0E0MzklMkMlMjJjbGllbnRIZWlnaHQlMjIlM0E2ODIlMkMlMjJ3aWR0aCUyMiUzQTQzOSUyQyUyMmhlaWdodCUyMiUzQTY4MiUyQyUyMmRldmljZVBpeGVsUmF0aW8lMjIlM0ExLjI1JTJDJTIydXNlckFnZW50JTIyJTNBJTIyTW96aWxsYSUyRjUuMCUyMChXaW5kb3dzJTIwTlQlMjAxMC4wJTNCJTIwV2luNjQlM0IlMjB4NjQpJTIwQXBwbGVXZWJLaXQlMkY1MzcuMzYlMjAoS0hUTUwlMkMlMjBsaWtlJTIwR2Vja28pJTIwQ2hyb21lJTJGMTUwLjAuMC4wJTIwU2FmYXJpJTJGNTM3LjM2JTIyJTdE
 .douyin.com    TRUE    /    FALSE    1785070927    stream_recommend_feed_params    %22%7B%5C%22cookie_enabled%5C%22%3Atrue%2C%5C%22screen_width%5C%22%3A1536%2C%5C%22screen_height%5C%22%3A864%2C%5C%22cookie_enabled%5C%22%3Atrue%2C%5C%22userAgent%5C%22%3AMozilla%2F5.0%20%28Windows%20NT%2010.0%3B%20Win64%3B%20x64%29%20AppleWebKit%2F537.36%20%28KHTML%2C%20like%20Gecko%29%20Chrome%2F150.0.0.0%20Safari%2F537.36%5C%22%7D%22"""
 
-is_valid, message = validate_cookies_content(cookies, 'douyin')
-print(f'Valid: {is_valid}')
-print(f'Message: {message}')
+if __name__ == '__main__':
+    is_valid, message = validate_cookies_content(cookies, 'douyin')
+    print(f'Valid: {is_valid}')
+    print(f'Message: {message}')

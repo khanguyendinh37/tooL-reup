@@ -1,9 +1,17 @@
 import os
 import asyncio
 import logging
+import shutil
 import subprocess
 
+from app.core.process_utils import hidden_subprocess_kwargs
+
 logger = logging.getLogger(__name__)
+
+# Keep a small bounded pool so Edge TTS requests can run concurrently without
+# overwhelming the service or the local machine.
+TTS_CONCURRENCY = 4
+TTS_SEGMENT_TIMEOUT_SECONDS = 90
 
 # Edge TTS voices mapping - frontend voice IDs match these
 EDGE_TTS_VOICES = {
@@ -43,6 +51,25 @@ EDGE_TTS_VOICES = {
     "ms": "ms-MY-YasminNeural",
 }
 
+# Fallback voices per language (if primary fails)
+VOICE_FALLBACKS = {
+    "vi": ["vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"],
+    "en": ["en-US-JennyNeural", "en-US-GuyNeural"],
+    "ja": ["ja-JP-NanamiNeural", "ja-JP-KeitaNeural"],
+    "ko": ["ko-KR-SunHiNeural", "ko-KR-InJoonNeural"],
+    "zh": ["zh-CN-XiaoxiaoNeural", "zh-CN-YunxiNeural"],
+    "th": ["th-TH-PremwadeeNeural"],
+    "fr": ["fr-FR-DeniseNeural"],
+    "de": ["de-DE-KatjaNeural"],
+    "es": ["es-ES-ElviraNeural"],
+    "pt": ["pt-BR-FranciscaNeural"],
+    "ru": ["ru-RU-SvetlanaNeural"],
+    "ar": ["ar-SA-ZariyahNeural"],
+    "hi": ["hi-IN-SwaraNeural"],
+    "id": ["id-ID-GadisNeural"],
+    "ms": ["ms-MY-YasminNeural"],
+}
+
 
 def get_edge_voice(voice: str) -> str:
     """Map frontend voice ID to Edge TTS voice."""
@@ -53,6 +80,15 @@ def get_edge_voice(voice: str) -> str:
     return EDGE_TTS_VOICES.get(lang, "en-US-JennyNeural")
 
 
+def get_fallback_voices(voice: str) -> list:
+    """Get list of fallback voices for a given voice."""
+    lang = voice.split("-")[0] if voice else "en"
+    fallbacks = VOICE_FALLBACKS.get(lang, ["en-US-JennyNeural"])
+    # Remove the primary voice from fallbacks
+    primary = get_edge_voice(voice)
+    return [v for v in fallbacks if v != primary]
+
+
 def speed_to_rate(speed: float) -> str:
     """Convert speed multiplier (0.5-2.0) to Edge TTS rate format (+0%, +50%, -20%, etc.)."""
     if speed == 1.0:
@@ -61,17 +97,9 @@ def speed_to_rate(speed: float) -> str:
     return f"{pct:+.0f}%"
 
 
-async def text_to_speech(text: str, voice: str, output_path: str, rate: str = "+0%") -> str:
-    """Generate TTS audio using Edge TTS (Microsoft Edge voices).
-
-    Args:
-        text: Text to synthesize
-        voice: Voice ID (e.g., 'vi-VN-NamMinhNeural', 'vi-VN-HoaiMyNeural')
-        output_path: Output file path (will be .mp3)
-        rate: Speech rate adjustment (e.g., '+0%', '+50%', '-20%')
-    """
+async def text_to_speech_edge(text: str, voice: str, output_path: str, rate: str = "+0%") -> str:
+    """Generate TTS audio using Edge TTS (Microsoft Edge voices)."""
     edge_voice = get_edge_voice(voice)
-
     try:
         import edge_tts
         communicate = edge_tts.Communicate(text, edge_voice, rate=rate)
@@ -85,29 +113,124 @@ async def text_to_speech(text: str, voice: str, output_path: str, rate: str = "+
         raise
 
 
-async def generate_dubbing_audio(segments: list, voice: str,
-                                  output_dir: str, rate: str = "+0%") -> list:
-    os.makedirs(output_dir, exist_ok=True)
-    audio_files = []
+async def text_to_speech_gtts(text: str, lang: str, output_path: str, slow: bool = False) -> str:
+    """Generate TTS audio using gTTS (Google Translate TTS) - fallback."""
+    try:
+        from gtts import gTTS
+        tts = gTTS(text=text, lang=lang, slow=slow)
+        await asyncio.to_thread(tts.save, output_path)
+        return output_path
+    except ImportError:
+        logger.error("gTTS not installed. Please install: pip install gTTS")
+        raise
+    except Exception as e:
+        logger.error(f"gTTS failed for lang '{lang}': {e}")
+        raise
 
-    for i, seg in enumerate(segments):
-        if not seg["text"].strip():
-            continue
 
-        seg_path = os.path.join(output_dir, f"seg_{i:04d}.mp3")
+async def text_to_speech_with_fallback(text: str, voice: str, output_path: str, rate: str = "+0%") -> str:
+    """Try Edge TTS with fallbacks, then fall back to gTTS."""
+    # Try primary voice
+    primary_voice = get_edge_voice(voice)
+    try:
+        return await text_to_speech_edge(text, voice, output_path, rate)
+    except Exception as e:
+        logger.warning(f"Primary voice '{primary_voice}' failed: {e}")
+
+    # Try fallback voices
+    fallback_voices = get_fallback_voices(voice)
+    for fb_voice in fallback_voices:
         try:
-            await text_to_speech(seg["text"], voice, seg_path, rate)
-            audio_files.append({
-                "index": i,
-                "start": seg["start"],
-                "end": seg["end"],
-                "text": seg["text"],
-                "audio_path": seg_path,
-            })
+            logger.info(f"Trying fallback voice: {fb_voice}")
+            return await text_to_speech_edge(text, fb_voice, output_path, rate)
         except Exception as e:
-            logger.error(f"Failed to generate TTS for segment {i}: {e}")
+            logger.warning(f"Fallback voice '{fb_voice}' failed: {e}")
 
-    return audio_files
+    # Try gTTS as last resort
+    lang = voice.split("-")[0] if voice else "en"
+    # Map language codes for gTTS
+    gtts_lang_map = {
+        "vi": "vi", "en": "en", "ja": "ja", "ko": "ko", "zh": "zh-cn",
+        "th": "th", "fr": "fr", "de": "de", "es": "es", "pt": "pt",
+        "ru": "ru", "ar": "ar", "hi": "hi", "id": "id", "ms": "ms"
+    }
+    gtts_lang = gtts_lang_map.get(lang, "en")
+    try:
+        logger.info(f"Falling back to gTTS with lang: {gtts_lang}")
+        return await text_to_speech_gtts(text, gtts_lang, output_path)
+    except Exception as e:
+        logger.error(f"All TTS methods failed: {e}")
+        raise
+
+
+async def _generate_segment_audio(index: int, segment: dict, voice: str,
+                                  output_dir: str, rate: str,
+                                  semaphore: asyncio.Semaphore) -> dict | None:
+    """Generate one segment while respecting the global TTS concurrency limit."""
+    text = segment.get("text", "").strip()
+    if not text:
+        return None
+
+    segment_path = os.path.join(output_dir, f"seg_{index:04d}.mp3")
+    async with semaphore:
+        try:
+            # Use fallback chain: Edge TTS -> fallback voices -> gTTS. A
+            # provider that hangs must not hold a job in TTS forever.
+            await asyncio.wait_for(
+                text_to_speech_with_fallback(text, voice, segment_path, rate),
+                timeout=TTS_SEGMENT_TIMEOUT_SECONDS,
+            )
+            return {
+                "index": index,
+                "start": segment["start"],
+                "end": segment["end"],
+                "text": text,
+                "audio_path": segment_path,
+            }
+        except Exception as exc:
+            logger.error(
+                f"Failed to generate TTS for segment {index} after all fallbacks: {exc}"
+            )
+            return None
+
+
+def cleanup_tts_directory(output_dir: str) -> None:
+    """Remove disposable per-segment TTS files after a successful merge.
+
+    The merged WAV and final video live outside this directory, so retrying a
+    failed job can safely regenerate the segments from ``translated.srt``.
+    Cleanup failures are logged but deliberately do not invalidate a completed
+    video.
+    """
+    if not os.path.isdir(output_dir):
+        return
+    try:
+        shutil.rmtree(output_dir)
+        logger.info("Removed disposable TTS directory: %s", output_dir)
+    except OSError as exc:
+        logger.warning("Could not remove disposable TTS directory %s: %s", output_dir, exc)
+
+
+async def generate_dubbing_audio(segments: list, voice: str,
+                                 output_dir: str, rate: str = "+0%") -> list:
+    """Generate all TTS segments concurrently while preserving timeline order."""
+    os.makedirs(output_dir, exist_ok=True)
+    semaphore = asyncio.Semaphore(TTS_CONCURRENCY)
+    tasks = [
+        _generate_segment_audio(index, segment, voice, output_dir, rate, semaphore)
+        for index, segment in enumerate(segments)
+        if segment.get("text", "").strip()
+    ]
+
+    if not tasks:
+        logger.warning("No transcribed text segments to synthesize")
+        return []
+
+    logger.info(
+        f"Generating {len(tasks)} TTS segments concurrently (limit={TTS_CONCURRENCY})"
+    )
+    results = await asyncio.gather(*tasks)
+    return [result for result in results if result is not None]
 
 
 def merge_tts_segments(audio_files: list, total_duration: float,
@@ -115,13 +238,15 @@ def merge_tts_segments(audio_files: list, total_duration: float,
     if not audio_files:
         logger.warning("No audio files to merge")
         return ""
+    if total_duration <= 0:
+        raise ValueError("Video duration must be greater than zero before merging TTS")
 
     silence_path = output_path + ".silence.wav"
     subprocess.run(
         ["ffmpeg", "-f", "lavfi", "-i",
          f"anullsrc=r=44100:cl=mono:d={total_duration}",
          "-y", silence_path],
-        capture_output=True, check=True
+        capture_output=True, check=True, **hidden_subprocess_kwargs()
     )
 
     filter_parts = []
@@ -151,7 +276,7 @@ def merge_tts_segments(audio_files: list, total_duration: float,
         "-y", output_path
     ])
 
-    subprocess.run(cmd, capture_output=True, check=True)
+    subprocess.run(cmd, capture_output=True, check=True, **hidden_subprocess_kwargs())
 
     if os.path.exists(silence_path):
         os.remove(silence_path)

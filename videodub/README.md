@@ -1,235 +1,241 @@
-# VideoDub - Tool Lồng Tiếng Video
+# VideoDub - Video Dubbing Tool
 
 Ứng dụng lồng tiếng video tự động bằng AI - **100% MIỄN PHÍ**, chạy local.
 
-## Tính năng
+## 🚀 Quick Start
 
-- **Tải video** từ YouTube, TikTok, Facebook, Twitter và 1000+ nền tảng
-- **Tạo phụ đề SRT** bằng faster-whisper (chạy local, miễn phí)
-- **Dịch thuật** bằng Google Translate (miễn phí, không cần API key)
-- **Tạo giọng lồng tiếng** bằng Google TTS (gTTS, miễn phí)
-- **Xóa giọng gốc** bằng Demucs (chạy local, miễn phí)
-- **Ghép video** tự động với ffmpeg
-- **Quản lý lịch sử** - xem lại, tải lại, xóa video đã lồng tiếng
-- **Giao diện đẹp mắt** với Dark theme + Glassmorphism
-- **Điều chỉnh tốc độ giọng nói** (0.5x - 2x)
-- **Hỗ trợ cookies** cho các nền tảng cần đăng nhập
-
-## Cài đặt
-
-### Yêu cầu
-
-- Python 3.11+
-- Node.js 18+
-- ffmpeg (cài đặt trước)
-- GPU (khuyến nghị cho faster-whisper và demucs)
-
-### Bước 1: Clone và cài đặt
-
-```bash
-cd videodub
-
-# Cài Backend
-cd backend
-pip install -r requirements.txt
-
-# Cài Frontend
-cd ../frontend
-npm install
-```
-
-### Bước 2: Chạy ứng dụng
-
-**Windows:**
-```bash
-run.bat
-```
-
-**Linux/Mac:**
-```bash
-chmod +x run.sh
-./run.sh
-```
-
-**Hoặc chạy riêng:**
-
-```bash
-# Terminal 1 - Backend
-cd backend
-python -m uvicorn app.main:app --reload --port 8000
-
-# Terminal 2 - Frontend
-cd frontend
-npm run dev
-```
-
-### Bước 3: Truy cập
-
-- Frontend: http://localhost:5173
-- Backend API: http://localhost:8000
-- API Docs: http://localhost:8000/docs
-
-## Docker
-
-### Cài đặt Docker
-
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) cho Windows/Mac
-- Docker Engine cho Linux
-
-### Chạy với Docker (Production)
-
-**Windows:**
+### Option 1: Docker Production (Recommended)
 ```bash
 docker-run.bat
 ```
-
-**Linux/Mac:**
-```bash
-chmod +x docker-run.sh
-./docker-run.sh
-```
-
-**Hoặc dùng docker-compose trực tiếp:**
-```bash
-# Build và chạy
-docker-compose up -d
-
-# Xem log
-docker-compose logs -f
-
-# Dừng
-docker-compose down
-```
-
-### Chạy Development mode với Docker
-
-```bash
-# Linux/Mac
-chmod +x docker-run-dev.sh
-./docker-run-dev.sh
-
-# Windows
-docker-run-dev.bat
-```
-
-Hoặc trực tiếp:
-```bash
-docker-compose -f docker-compose.dev.yml up -d
-```
-
-Frontend dev server: http://localhost:5173
-
-### Truy cập (Docker Production)
-
 - Frontend: http://localhost:3000
 - Backend API: http://localhost:8000
 - API Docs: http://localhost:8000/docs
 
-### GPU Support (Optional)
+### Option 2: Docker Development (Hot Reload)
+```bash
+docker-run-dev.bat
+```
+- Frontend (Vite): http://localhost:5173
+- Backend (FastAPI + reload): http://localhost:8000
 
-Để sử dụng GPU với Docker, cần cài đặt [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) và uncomment phần `deploy.resources.reservations.devices` trong `docker-compose.yml`.
+### Option 3: Local Development (No Docker)
+```bash
+# Build both
+build.bat
 
-## Cấu trúc thư mục
+# Run both
+run.bat
+```
+
+### Option 4: Desktop Windows (Portable)
+```bat
+desktop\build.bat
+desktop\run_desktop.bat
+```
+
+The desktop build opens the React UI in a native window, starts FastAPI locally, bundles FFmpeg, and stores user data in `%LOCALAPPDATA%\VideoDub`. Windows local development now uses the same data directory by default, so settings/API keys are consistent between `run.bat` and desktop. See [`desktop/README.md`](desktop/README.md) for requirements and troubleshooting.
+
+Or run separately:
+```bash
+# Terminal 1 - Backend
+cd backend
+run.bat
+
+# Terminal 2 - Frontend
+cd frontend
+run.bat
+```
+
+## 📋 Available Scripts
+
+| Script | Description |
+|--------|-------------|
+| `build.bat` | Build both frontend & backend locally |
+| `run.bat` | Start both dev servers locally |
+| `docker-run.bat` | Build & run production Docker containers |
+| `docker-run-dev.bat` | Build & run development Docker containers (hot reload) |
+| `docker-stop.bat` | Stop all Docker containers |
+| `desktop\build.bat` | Build portable Windows desktop app |
+| `desktop\run_desktop.bat` | Launch the packaged desktop app |
+| `stop-local.bat` | Stop local development servers on ports 8000 and 5173 |
+
+### Backend Scripts (`backend/`)
+| Script | Description |
+|--------|-------------|
+| `build.bat` | Install Python dependencies |
+| `run.bat` | Start FastAPI dev server (port 8000) |
+
+### Frontend Scripts (`frontend/`)
+| Script | Description |
+|--------|-------------|
+| `build.bat` | Install deps & build for production |
+| `run.bat` | Start Vite dev server (port 5173) |
+
+## 🐳 Docker Commands (Manual)
+
+```bash
+# Production
+docker-compose up -d --build      # Build & start
+docker-compose down               # Stop
+docker-compose down -v            # Stop & remove volumes (DB data)
+docker-compose logs -f            # View logs
+docker-compose ps                 # Check status
+
+# Development
+docker-compose -f docker-compose.dev.yml up -d --build
+docker-compose -f docker-compose.dev.yml down
+docker-compose -f docker-compose.dev.yml logs -f
+```
+
+## 🔧 Requirements
+
+### Local Development
+- **Python 3.11+**
+- **Node.js 18+**
+- **FFmpeg** (for video/audio processing)
+- **GPU** (recommended for faster-whisper & Demucs)
+
+### Docker
+- **Docker Desktop** (Windows/Mac) or Docker Engine (Linux)
+- **Docker Compose v2+**
+
+## 📁 Project Structure
 
 ```
 videodub/
-├── frontend/               # React + Vite + Tailwind
-│   ├── src/
-│   │   ├── components/     # UI components
-│   │   ├── pages/          # Trang Dashboard, Dubbing, History, Settings
-│   │   ├── stores/         # Zustand state management
-│   │   └── lib/            # Utilities, API
-│   ├── Dockerfile          # Production build
-│   ├── Dockerfile.dev      # Development build
-│   └── package.json
-│
-├── backend/                # Python FastAPI
+├── backend/                 # FastAPI backend
 │   ├── app/
-│   │   ├── api/            # API endpoints
+│   │   ├── api/            # API routes
 │   │   ├── core/           # Pipeline processing
 │   │   ├── models/         # Database models
 │   │   └── schemas/        # Pydantic schemas
-│   ├── Dockerfile
-│   └── requirements.txt
-│
-├── docker-compose.yml      # Production Docker
-├── docker-compose.dev.yml  # Development Docker
-├── docker-run.sh           # Script chạy Docker (Linux/Mac)
-├── docker-run.bat          # Script chạy Docker (Windows)
-├── docker-run-dev.sh       # Script chạy Docker Dev (Linux/Mac)
-├── docker-run-dev.bat      # Script chạy Docker Dev (Windows)
-├── run.bat                 # Script chạy local (Windows)
-├── run.sh                  # Script chạy local (Linux/Mac)
+│   ├── Dockerfile          # Production Dockerfile
+│   ├── requirements.txt
+│   └── build.bat / run.bat
+├── frontend/               # React + Vite + Tailwind
+│   ├── src/
+│   │   ├── components/     # UI components
+│   │   ├── pages/          # Dashboard, Dubbing, History, Settings
+│   │   ├── stores/         # Zustand state management
+│   │   └── lib/            # Utilities, API
+│   ├── Dockerfile          # Production (nginx)
+│   ├── Dockerfile.dev      # Development
+│   ├── nginx.conf
+│   ├── package.json
+│   └── build.bat / run.bat
+├── docker-compose.yml      # Production
+├── docker-compose.dev.yml  # Development
+├── build.bat               # Build both locally
+├── run.bat                 # Run both locally
+├── docker-run.bat          # Docker production
+├── docker-run-dev.bat      # Docker development
+├── docker-stop.bat         # Stop containers
 └── README.md
 ```
 
-## Công nghệ sử dụng
+## 🌐 Access Points
 
-| Thành phần | Công cụ | Chi phí |
-|------------|----------|---------|
-| Frontend | React + Vite + Tailwind | Miễn phí |
-| Backend | Python FastAPI | Miễn phí |
-| Database | SQLite | Miễn phí |
-| Download | yt-dlp | Miễn phí |
-| Speech-to-Text | faster-whisper | Miễn phí |
-| Translation | deep-translator (Google) | Miễn phí |
-| TTS | gTTS (Google Translate TTS) | Miễn phí |
-| Vocal Remove | demucs | Miễn phí |
-| Video Processing | ffmpeg | Miễn phí |
+| Service | Local | Docker (Prod) | Docker (Dev) |
+|---------|-------|---------------|--------------|
+| Frontend | http://localhost:5173 | http://localhost:3000 | http://localhost:5173 |
+| Backend API | http://localhost:8000 | http://localhost:8000 | http://localhost:8000 |
+| API Docs | http://localhost:8000/docs | http://localhost:8000/docs | http://localhost:8000/docs |
+| Health Check | http://localhost:8000/api/health | http://localhost:8000/api/health | http://localhost:8000/api/health |
 
-## Hỗ trợ ngôn ngữ
+## 🛠 Features
 
-- **Nhận dạng:** 99+ ngôn ngữ (qua Whisper)
-- **Dịch thuật:** 16+ ngôn ngữ
-- **Lồng tiếng:** 300+ giọng (qua Edge TTS - cần kết nối internet)
+- **Video Download**: YouTube, TikTok, Facebook, Twitter + 1000+ sites (yt-dlp)
+- **Subtitle Generation**: faster-whisper (local, free, 99+ languages)
+- **Translation**: Google Translate fallback plus optional OpenAI, OpenRouter, NVIDIA NIM, Gemini, Anthropic, and OpenAI-compatible endpoints
+- **Text-to-Speech**: Edge TTS (free, 300+ voices) + gTTS fallback
+- **Vocal Removal**: Demucs (local, free)
+- **Video Processing**: FFmpeg for merging
+- **History Management**: SQLite database
+- **Dark Theme UI**: Glassmorphism design
+- **Speed Control**: 0.5x - 2x speech rate
+- **Cookies Support**: For private/restricted content
 
-## Các nút lệnh hữu ích
+## ⚙️ Configuration
 
-```bash
-# Build lại Docker images
-docker-compose build
+### AI Translation (optional)
+Open **Cài đặt → Dịch thuật** to configure an AI provider:
 
-# Xem log real-time
-docker-compose logs -f
+- OpenAI, OpenRouter, NVIDIA NIM, Google Gemini, Anthropic, or any OpenAI-compatible endpoint.
+- Enter an API key and select a model. The key is stored locally and is never returned by the settings API.
+- When a key is missing, the configuration is incomplete, or an AI request fails, the app automatically keeps the affected subtitle block on Google Translate instead of failing the dubbing job.
+- The **Kiểm tra kết nối** action checks the selected route without saving the key; save the settings after a successful test to use AI for future jobs.
 
-# Dừng và xóa containers
-docker-compose down
-
-# Dừng và xóa containers + volumes (xóa data)
-docker-compose down -v
-
-# Chạy lại mà không build
-docker-compose up -d
+### Backend Environment
+Create `backend/.env`:
+```env
+DATABASE_URL=sqlite+aiosqlite:///./data/videodub.db
+# Optional: Add API keys for premium services
 ```
 
-## Cấu hình Cookies (cho YouTube, Facebook, etc.)
+### GPU Support (Docker)
+Uncomment in `docker-compose.yml`:
+```yaml
+deploy:
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: all
+          capabilities: [gpu]
+```
+Requires: [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
 
-Một số nền tảng yêu cầu đăng nhập để tải video. Bạn có thể:
+## 🐛 Troubleshooting
 
-1. Vào trang **Settings** (Cài đặt) trong ứng dụng
-2. Chọn nền tảng (YouTube, Facebook, etc.)
-3. Upload file cookies.txt (export từ trình duyệt bằng extension "Get cookies.txt LOCALLY")
+### Docker Issues
+```bash
+# Full reset
+docker-compose down -v
+docker system prune -a
+docker-run.bat
+```
 
-## Xử lý sự cố
+### Port Conflicts
+Default ports:
+- Frontend (local): 5173
+- Backend (local): 8000
+- Frontend (Docker prod): 3000
+- Backend (Docker): 8000
 
-### Lỗi "ffmpeg not found"
-Cài đặt ffmpeg:
-- Windows: `winget install ffmpeg` hoặc tải từ ffmpeg.org
+Change in `docker-compose.yml` or `frontend/vite.config.ts` if needed.
+
+### Backend Dependencies
+```bash
+cd backend
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### Frontend Dependencies
+```bash
+cd frontend
+rm -rf node_modules package-lock.json
+npm install
+```
+
+### FFmpeg Not Found
+- Windows: `winget install ffmpeg` or download from ffmpeg.org
 - Mac: `brew install ffmpeg`
 - Linux: `sudo apt install ffmpeg`
 
-### Lỗi tải video YouTube
-- Cập nhật yt-dlp: `pip install -U yt-dlp`
-- Thêm cookies YouTube trong Settings
+### YouTube Download Fails
+- Update yt-dlp: `pip install -U yt-dlp`
+- Add YouTube cookies in Settings page
 
-### Lỗi GPU/Out of memory
-- Giảm Whisper model size (tiny, base thay vì small/medium)
-- Sử dụng CPU-only mode (mặc định trong Docker)
+### GPU / OOM Errors
+- Use smaller Whisper model (tiny/base instead of small/medium)
+- Enable CPU-only mode (default in Docker)
 
-### Tốc độ xử lý chậm
-- Sử dụng Whisper model nhỏ hơn (tiny/base)
-- Bật GPU nếu có (cần nvidia-container-toolkit cho Docker)
+### Slow Processing
+- Use smaller Whisper model
+- Enable GPU if available
 
-## License
+## 📝 License
 
-MIT License
+MIT License - Free for personal and commercial use.

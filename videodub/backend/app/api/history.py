@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, desc
 
 from app.models.database import get_session, DubbingJob
+from app.core.paths import OUTPUT_DIR
 from app.schemas.dubbing import DubbingResponse
 
 router = APIRouter()
@@ -39,7 +40,7 @@ async def delete_job(job_id: str, session: AsyncSession = Depends(get_session)):
 
     import shutil
     import os
-    job_dir = os.path.join("output", job_id)
+    job_dir = os.path.join(str(OUTPUT_DIR), job_id)
     if os.path.exists(job_dir):
         shutil.rmtree(job_dir, ignore_errors=True)
 

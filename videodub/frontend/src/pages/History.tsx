@@ -1,7 +1,10 @@
-import { useState, useEffect } from 'react'
-import { Search, Grid3X3, List, Trash2, Download, Play, Clock, MoreVertical, Loader2, AlertCircle, X } from 'lucide-react'
-import { getHistory, deleteHistoryItem } from '@/lib/api'
+import { useState, useEffect, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { Search, Grid3X3, List, Trash2, Download, Play, Clock, MoreVertical, Loader2, AlertCircle, Pause, RotateCcw } from 'lucide-react'
+import { downloadFile, getHistory, deleteHistoryItem, retryDubbing } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
+import { workflowFromJob } from '@/lib/workflow'
+import { useAppStore } from '@/stores/appStore'
 
 interface HistoryItem {
   id: string
@@ -18,7 +21,10 @@ interface HistoryItem {
 }
 
 export default function History() {
+  const navigate = useNavigate()
+  const setActiveWorkflow = useAppStore((state) => state.setActiveWorkflow)
   const [items, setItems] = useState<HistoryItem[]>([])
+  const [retryingId, setRetryingId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
@@ -26,11 +32,22 @@ export default function History() {
   const [filterStatus, setFilterStatus] = useState<string>('all')
   const [openMenu, setOpenMenu] = useState<string | null>(null)
 
-  // Video preview state
-  const [previewVideo, setPreviewVideo] = useState<{ id: string; url: string; title: string } | null>(null)
+  // Inline video player state
+  const [playingId, setPlayingId] = useState<string | null>(null)
+  const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map())
 
   useEffect(() => {
     loadHistory()
+  }, [])
+
+  // Stop video when component unmounts
+  useEffect(() => {
+    return () => {
+      videoRefs.current.forEach((video) => {
+        video.pause()
+        video.src = ''
+      })
+    }
   }, [])
 
   const loadHistory = async () => {
@@ -53,30 +70,71 @@ export default function History() {
       await deleteHistoryItem(id)
       setItems(prev => prev.filter(item => item.id !== id))
       setOpenMenu(null)
+      if (playingId === id) setPlayingId(null)
     } catch (err) {
       alert('Không thể xóa video')
     }
   }
 
-  const handleDownload = (item: HistoryItem) => {
-    if (item.status === 'completed') {
-      window.open(`/api/dubbing/${item.id}/download`, '_blank')
+  const handleDownload = async (item: HistoryItem) => {
+    if (item.status !== 'completed') return
+    try {
+      await downloadFile(`/api/dubbing/${item.id}/download`, `${item.id}_dubbed.mp4`)
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Không thể lưu video')
     }
   }
 
-  const handlePreview = (item: HistoryItem) => {
-    if (item.status === 'completed') {
-      setPreviewVideo({
-        id: item.id,
-        url: `/api/dubbing/${item.id}/download`,
-        title: item.title || 'Video đã lồng tiếng'
-      })
+  const handleRetry = async (item: HistoryItem) => {
+    if (item.status !== 'error' || retryingId) return
+    setRetryingId(item.id)
+    try {
+      const job = await retryDubbing(item.id)
+      setItems((current) => current.map((entry) => entry.id === item.id
+        ? { ...entry, status: job.status, progress: job.progress, error: null }
+        : entry))
+      // Retry starts a fresh run: reset startedAt so monitoring is not
+      // measured from the original job creation time.
+      setActiveWorkflow({ ...workflowFromJob(job), startedAt: new Date().toISOString() })
+      navigate(`/dubbing/${item.id}`)
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Không thể chạy lại quy trình')
+    } finally {
+      setRetryingId(null)
     }
   }
 
-  const closePreview = () => {
-    setPreviewVideo(null)
+  const handlePlayToggle = (item: HistoryItem) => {
+    if (item.status !== 'completed') return
+
+    if (playingId === item.id) {
+      // Pause current video
+      const video = videoRefs.current.get(item.id)
+      if (video) video.pause()
+      setPlayingId(null)
+    } else {
+      // Stop any currently playing video
+      if (playingId) {
+        const prevVideo = videoRefs.current.get(playingId)
+        if (prevVideo) prevVideo.pause()
+      }
+      // Start playing new video
+      setPlayingId(item.id)
+      // Video will auto-play via useEffect below
+    }
   }
+
+  // Auto-play when playingId changes
+  useEffect(() => {
+    if (playingId) {
+      const video = videoRefs.current.get(playingId)
+      if (video) {
+        video.src = `/api/dubbing/${playingId}/download`
+        video.load()
+        video.play().catch(() => {})
+      }
+    }
+  }, [playingId])
 
   const filteredData = items.filter(item => {
     const title = item.title || item.url
@@ -91,6 +149,8 @@ export default function History() {
         return <span className="px-2 py-1 text-xs rounded-full bg-emerald-500/20 text-emerald-400">Hoàn thành</span>
       case 'pending':
       case 'downloading':
+      case 'preview_ready':
+      case 'processing':
       case 'transcribing':
       case 'translating':
       case 'tts':
@@ -107,7 +167,6 @@ export default function History() {
   // Render thumbnail or placeholder
   const renderThumbnail = (item: HistoryItem) => {
     if (item.thumbnail_path) {
-      // Convert server path to accessible URL
       const thumbUrl = `/api/dubbing/${item.id}/thumbnail`
       return (
         <img
@@ -199,14 +258,46 @@ export default function History() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {filteredData.map((item) => (
             <div key={item.id} className="glass-card hover:scale-[1.02] transition-all duration-300">
-              {/* Thumbnail */}
+              {/* Thumbnail / Video Player */}
               <div className="aspect-video bg-surface-800 rounded-xl mb-4 flex items-center justify-center relative overflow-hidden group">
-                {renderThumbnail(item)}
-                <Play className="w-12 h-12 text-surface-500 relative z-10 group-hover:text-primary-400 transition-colors" />
-                {item.file_size && (
-                  <div className="absolute bottom-2 right-2 bg-black/70 px-2 py-1 rounded text-xs text-white">
-                    {item.file_size}
+                {playingId === item.id ? (
+                  /* Inline video player */
+                  <div className="absolute inset-0 bg-black">
+                    <video
+                      ref={(el) => {
+                        if (el) videoRefs.current.set(item.id, el)
+                      }}
+                      controls
+                      autoPlay
+                      className="w-full h-full"
+                      style={{ objectFit: 'contain' }}
+                      onEnded={() => setPlayingId(null)}
+                    />
+                    <button
+                      onClick={() => handlePlayToggle(item)}
+                      className="absolute top-2 right-2 z-10 bg-black/60 hover:bg-black/80 rounded-full p-1.5 transition-colors"
+                      title="Dừng"
+                    >
+                      <Pause className="w-4 h-4 text-white" />
+                    </button>
                   </div>
+                ) : (
+                  <>
+                    {renderThumbnail(item)}
+                    <button
+                      onClick={() => handlePlayToggle(item)}
+                      className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 hover:opacity-50 transition-opacity"
+                    >
+                      <div className="w-14 h-14 rounded-full bg-primary-600/80 flex items-center justify-center hover:bg-primary-500 transition-colors">
+                        <Play className="w-7 h-7 text-white ml-0.5" />
+                      </div>
+                    </button>
+                    {item.file_size && (
+                      <div className="absolute bottom-2 right-2 bg-black/70 px-2 py-1 rounded text-xs text-white">
+                        {item.file_size}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
 
@@ -230,20 +321,43 @@ export default function History() {
                 {item.status === 'completed' && (
                   <>
                     <button
-                      onClick={() => handleDownload(item)}
+                      onClick={() => void handleDownload(item)}
                       className="btn-ghost flex-1 text-sm"
                     >
                       <Download className="w-4 h-4 mr-1" />
                       Tải
                     </button>
                     <button
-                      onClick={() => handlePreview(item)}
-                      className="btn-primary flex-1 text-sm"
+                      onClick={() => handlePlayToggle(item)}
+                      className={`flex-1 text-sm inline-flex items-center justify-center gap-1 px-3 py-2 rounded-lg font-medium transition-all ${
+                        playingId === item.id
+                          ? 'bg-red-600/20 text-red-400 border border-red-500/30 hover:bg-red-600/30'
+                          : 'bg-primary-600/20 text-primary-400 border border-primary-500/30 hover:bg-primary-600/30'
+                      }`}
                     >
-                      <Play className="w-4 h-4 mr-1" />
-                      Xem
+                      {playingId === item.id ? (
+                        <>
+                          <Pause className="w-4 h-4 mr-1" />
+                          Dừng
+                        </>
+                      ) : (
+                        <>
+                          <Play className="w-4 h-4 mr-1" />
+                          Xem
+                        </>
+                      )}
                     </button>
                   </>
+                )}
+                {item.status === 'error' && (
+                  <button
+                    onClick={() => void handleRetry(item)}
+                    disabled={retryingId === item.id}
+                    className="btn-primary flex-1 inline-flex items-center justify-center gap-2 text-sm disabled:cursor-wait disabled:opacity-60"
+                  >
+                    {retryingId === item.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+                    {retryingId === item.id ? 'Đang chạy lại...' : 'Chạy lại'}
+                  </button>
                 )}
                 <div className="relative">
                   <button
@@ -273,9 +387,28 @@ export default function History() {
         <div className="space-y-2">
           {filteredData.map((item) => (
             <div key={item.id} className="glass-card !p-4 flex items-center gap-4 hover:bg-surface-800/30 transition-colors">
-              <div className="w-24 h-14 bg-surface-800 rounded-lg flex items-center justify-center flex-shrink-0 relative overflow-hidden">
-                {renderThumbnail(item)}
-                <Play className="w-6 h-6 text-surface-500 relative z-10" />
+              <div
+                className="w-24 h-14 bg-surface-800 rounded-lg flex items-center justify-center flex-shrink-0 relative overflow-hidden cursor-pointer"
+                onClick={() => handlePlayToggle(item)}
+              >
+                {playingId === item.id ? (
+                  <div className="absolute inset-0 bg-black flex items-center justify-center">
+                    <video
+                      ref={(el) => {
+                        if (el) videoRefs.current.set(item.id, el)
+                      }}
+                      autoPlay
+                      className="w-full h-full object-cover"
+                      onEnded={() => setPlayingId(null)}
+                    />
+                    <Pause className="w-5 h-5 text-white relative z-10" />
+                  </div>
+                ) : (
+                  <>
+                    {renderThumbnail(item)}
+                    <Play className="w-6 h-6 text-surface-500 relative z-10" />
+                  </>
+                )}
               </div>
 
               <div className="flex-1 min-w-0">
@@ -295,18 +428,35 @@ export default function History() {
                 {item.status === 'completed' && (
                   <>
                     <button
-                      onClick={() => handleDownload(item)}
+                      onClick={() => void handleDownload(item)}
                       className="btn-ghost !px-2"
+                      title="Tải video"
                     >
                       <Download className="w-4 h-4" />
                     </button>
                     <button
-                      onClick={() => handlePreview(item)}
-                      className="btn-ghost !px-2"
+                      onClick={() => handlePlayToggle(item)}
+                      className={`btn-ghost !px-2 ${playingId === item.id ? 'text-red-400 hover:text-red-300' : 'text-primary-400 hover:text-primary-300'}`}
+                      title={playingId === item.id ? 'Dừng' : 'Xem ngay'}
                     >
-                      <Play className="w-4 h-4" />
+                      {playingId === item.id ? (
+                        <Pause className="w-4 h-4" />
+                      ) : (
+                        <Play className="w-4 h-4" />
+                      )}
                     </button>
                   </>
+                )}
+                {item.status === 'error' && (
+                  <button
+                    onClick={() => void handleRetry(item)}
+                    disabled={retryingId === item.id}
+                    className="btn-ghost !px-2 text-primary-400 hover:text-primary-300 disabled:cursor-wait disabled:opacity-60"
+                    title="Chạy lại quy trình"
+                    aria-label="Chạy lại quy trình"
+                  >
+                    {retryingId === item.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+                  </button>
                 )}
                 <button
                   onClick={() => handleDelete(item.id)}
@@ -329,44 +479,6 @@ export default function History() {
           <p className="text-surface-400">
             {items.length === 0 ? 'Chưa có video nào được lồng tiếng' : 'Không tìm thấy video nào'}
           </p>
-        </div>
-      )}
-
-      {/* Video Preview Modal */}
-      {previewVideo && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm" onClick={closePreview}>
-          <div className="relative w-full max-w-4xl bg-surface-900 rounded-xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
-            {/* Header */}
-            <div className="flex items-center justify-between p-4 border-b border-surface-700">
-              <h3 className="font-semibold text-surface-100 truncate pr-4">{previewVideo.title}</h3>
-              <div className="flex items-center gap-2">
-                <a
-                  href={`/api/dubbing/${previewVideo.id}/download`}
-                  target="_blank"
-                  className="btn-primary inline-flex items-center gap-2 text-sm"
-                >
-                  <Download className="w-4 h-4" />
-                  Tải
-                </a>
-                <button
-                  onClick={closePreview}
-                  className="btn-ghost p-2"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
-
-            {/* Video Player */}
-            <div className="relative" style={{ paddingTop: '56.25%' }}>
-              <video
-                src={previewVideo.url}
-                controls
-                className="absolute top-0 left-0 w-full h-full"
-                style={{ objectFit: 'contain', backgroundColor: '#000' }}
-              />
-            </div>
-          </div>
         </div>
       )}
     </div>

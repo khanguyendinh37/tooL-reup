@@ -88,6 +88,11 @@ ENV/
 # Cookies (sensitive data)
 cookies/
 
+# Desktop packaging artifacts
+videodub/desktop/vendor/
+videodub/desktop/build/
+videodub/desktop/dist/
+
 # OS
 Thumbs.db
 

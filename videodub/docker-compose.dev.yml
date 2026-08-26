@@ -13,11 +13,20 @@ services:
       - backend_data:/app/data
       - ./backend/temp:/app/temp
       - ./backend/output:/app/output
+      - ./backend/cookies:/app/cookies
     environment:
       - DATABASE_URL=sqlite+aiosqlite:///./data/videodub.db
       - PYTHONUNBUFFERED=1
     command: python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - videodub-network
 
   frontend:
     build:
@@ -30,11 +39,19 @@ services:
       - ./frontend:/app
       - /app/node_modules
     environment:
-      - VITE_API_URL=http://localhost:8000
+      - VITE_API_URL=http://videodub-backend-dev:8000
+      - CHOKIDAR_USEPOLLING=true
     command: npm run dev -- --host
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped
+    networks:
+      - videodub-network
 
 volumes:
   backend_data:
+
+networks:
+  videodub-network:
+    driver: bridge

@@ -6,15 +6,18 @@ import re
 import json
 from urllib.parse import urlparse, parse_qs
 
+from app.core.paths import COOKIES_DIR as DATA_COOKIES_DIR, TEMP_DIR
+from app.core.process_utils import hidden_subprocess_kwargs
+
 logger = logging.getLogger(__name__)
 
-COOKIES_DIR = "cookies"
+COOKIES_DIR = str(DATA_COOKIES_DIR)
 os.makedirs(COOKIES_DIR, exist_ok=True)
 
 SUPPORTED_PLATFORMS = {
-    "youtube": {"name": "YouTube", "domains": ["youtube.com", "youtu.be"]},
-    "tiktok": {"name": "TikTok", "domains": ["tiktok.com"]},
-    "douyin": {"name": "抖音", "domains": ["douyin.com", "v.douyin.com", "iesdouyin.com"]},
+    "youtube": {"name": "YouTube", "domains": ["youtube.com", "youtu.be", "google.com"]},
+    "tiktok": {"name": "TikTok", "domains": ["tiktok.com", "tiktokv.com"]},
+    "douyin": {"name": "抖音", "domains": ["douyin.com", "v.douyin.com", "iesdouyin.com", "live.douyin.com"]},
     "facebook": {"name": "Facebook", "domains": ["facebook.com", "fb.com", "fb.watch"]},
     "twitter": {"name": "Twitter/X", "domains": ["twitter.com", "x.com"]},
     "instagram": {"name": "Instagram", "domains": ["instagram.com"]},
@@ -34,10 +37,12 @@ def detect_platform(url: str) -> str | None:
 
 # ==================== Douyin API-based Downloader (More Reliable) ====================
 
-async def download_douyin_by_api(url: str, output_dir: str, video_id: str) -> dict:
+async def download_douyin_by_api(url: str, output_dir: str, video_id: str, progress_cb=None) -> dict:
     """
     Download Douyin video using internal web API (similar to jiji262/douyin-downloader).
     This is more reliable than yt-dlp for Douyin as it uses the official web API.
+
+    ``progress_cb`` (optional) is called with the download percentage (0-100).
 
     NOTE: Douyin requires X-Bogus signature for most API endpoints. This function tries
     multiple endpoints and falls back to yt-dlp if API access fails.
@@ -135,7 +140,13 @@ async def download_douyin_by_api(url: str, output_dir: str, video_id: str) -> di
             # 1. iesdouyin web API (sometimes works without X-Bogus)
             {
                 "url": "https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/",
-                "params": {"item_ids": douyin_video_id},
+                "params": {
+                    "item_ids": douyin_video_id,
+                    "aid": "1128",
+                    "version_code": "320100",
+                    "device_platform": "webapp",
+                    "os": "windows",
+                },
                 "parser": "iesdouyin",
             },
             # 2. Douyin web API v1 with X-Bogus
@@ -296,10 +307,16 @@ async def download_douyin_by_api(url: str, output_dir: str, video_id: str) -> di
                 if "login" in text.lower() or "验证" in text:
                     raise Exception("Video download requires login - please add Douyin cookies")
 
-            # Save video
+            # Save video, reporting progress when the total size is known
+            content_length = resp.headers.get("Content-Length", "")
+            total_bytes = int(content_length) if content_length.isdigit() else 0
+            received = 0
             async with aiofiles.open(output_path, "wb") as f:
                 async for chunk in resp.content.iter_chunked(8192):
                     await f.write(chunk)
+                    received += len(chunk)
+                    if progress_cb and total_bytes:
+                        progress_cb(received / total_bytes * 100)
 
         # Verify download
         if not os.path.exists(output_path) or os.path.getsize(output_path) < 1024:
@@ -375,12 +392,14 @@ def parse_netscape_cookies(cookies_file: str, platform: str = "douyin") -> dict:
     """Parse Netscape format cookies.txt file."""
     cookies = {}
     domain_filter = {
-        "douyin": ["douyin.com", "iesdouyin.com"],
+        "youtube": ["youtube.com", "youtu.be", "google.com"],
+        "douyin": ["douyin.com", "iesdouyin.com", "v.douyin.com"],
         "tiktok": ["tiktok.com", "tiktokv.com"],
         "facebook": ["facebook.com", "fb.com", "fb.watch"],
         "twitter": ["twitter.com", "x.com"],
         "instagram": ["instagram.com"],
     }.get(platform, [])
+    logger.info(f"Parsing cookies for platform: {platform}, domain_filter: {domain_filter}")
     try:
         with open(cookies_file, "r", encoding="utf-8") as f:
             for line_num, line in enumerate(f, 1):
@@ -403,6 +422,7 @@ def parse_netscape_cookies(cookies_file: str, platform: str = "douyin") -> dict:
                         cookies[name] = value
                 else:
                     cookies[name] = value
+        logger.info(f"Parsed {len(cookies)} cookies for {platform}")
     except Exception as e:
         logger.warning(f"Failed to parse cookies file: {e}")
     return cookies
@@ -413,6 +433,8 @@ def validate_cookies_content(cookies_content: str, platform: str) -> tuple[bool,
     import tempfile
     import os
 
+    logger.info(f"Validating cookies for platform: {platform}")
+
     # Write to temp file and try parsing
     with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
         f.write(cookies_content)
@@ -420,25 +442,30 @@ def validate_cookies_content(cookies_content: str, platform: str) -> tuple[bool,
 
     try:
         cookies = parse_netscape_cookies(temp_path, platform)
+        logger.info(f"Platform: {platform}, Parsed cookies count: {len(cookies)}")
         if not cookies:
             return False, f"Không tìm thấy cookie hợp lệ cho {platform}. File cookies.txt có thể bị lỗi hoặc hết hạn. Vui lòng export lại từ extension 'Get cookies.txt LOCALLY' sau khi đăng nhập."
 
-        # Check for essential cookies
+        # Check for essential cookies - require at least ONE from each group
         essential_cookies = {
-            "douyin": ["sessionid", "ttwid", "msToken"],
-            "tiktok": ["sessionid", "ttwid", "msToken"],
+            "youtube": ["SID", "HSID", "SSID", "__Secure-1PSID"],
+            "douyin": ["sessionid", "ttwid", "passport_csrf_token"],
+            "tiktok": ["sessionid", "ttwid", "passport_csrf_token"],
             "facebook": ["c_user", "xs"],
             "twitter": ["auth_token", "ct0"],
             "instagram": ["sessionid", "csrftoken"],
         }
 
         platform_essential = essential_cookies.get(platform, [])
-        missing_essential = [c for c in platform_essential if c not in cookies]
-        if missing_essential:
-            missing_str = ", ".join(missing_essential)
-            return False, f"Thiếu cookie quan trọng cho {platform}: {missing_str}. Vui lòng đăng nhập lại và export cookies mới."
+        found_essential = [c for c in platform_essential if c in cookies]
+        logger.info(f"Platform essential: {platform_essential}, Found: {found_essential}")
 
-        return True, f"Cookies hợp lệ: tìm thấy {len(cookies)} cookie(s). Đã có các cookie quan trọng: {', '.join([c for c in platform_essential if c in cookies])}"
+        # Require at least ONE essential cookie (not all)
+        if platform_essential and not found_essential:
+            essential_str = ", ".join(platform_essential)
+            return False, f"Không tìm thấy cookie quan trọng nào cho {platform}. Cần ít nhất 1 trong: {essential_str}. Vui lòng export lại cookies."
+
+        return True, f"Cookies hợp lệ: tìm thấy {len(cookies)} cookie(s). Cookie quan trọng: {', '.join(found_essential) if found_essential else 'N/A'}"
     finally:
         try:
             os.unlink(temp_path)
@@ -448,10 +475,12 @@ def validate_cookies_content(cookies_content: str, platform: str) -> tuple[bool,
 
 # ==================== TikTok API-based Downloader ====================
 
-async def download_tiktok_by_api(url: str, output_dir: str, video_id: str) -> dict:
+async def download_tiktok_by_api(url: str, output_dir: str, video_id: str, progress_cb=None) -> dict:
     """
     Download TikTok video using internal web API.
     This is more reliable than yt-dlp for TikTok when cookies are available.
+
+    ``progress_cb`` (optional) is called with the download percentage (0-100).
     """
     import aiohttp
     import aiofiles
@@ -655,10 +684,16 @@ async def download_tiktok_by_api(url: str, output_dir: str, video_id: str) -> di
                 if "login" in text.lower() or "验证" in text:
                     raise Exception("Video download requires login - please add TikTok cookies")
 
-            # Save video
+            # Save video, reporting progress when the total size is known
+            content_length = resp.headers.get("Content-Length", "")
+            total_bytes = int(content_length) if content_length.isdigit() else 0
+            received = 0
             async with aiofiles.open(output_path, "wb") as f:
                 async for chunk in resp.content.iter_chunked(8192):
                     await f.write(chunk)
+                    received += len(chunk)
+                    if progress_cb and total_bytes:
+                        progress_cb(received / total_bytes * 100)
 
         # Verify download
         if not os.path.exists(output_path) or os.path.getsize(output_path) < 1024:
@@ -731,13 +766,19 @@ def resolve_tiktok_short_url(short_code: str) -> str | None:
 
 # ==================== yt-dlp downloaders (existing) ====================
 
-async def download_with_pytubefix(url: str, output_dir: str, video_id: str) -> dict:
+async def download_with_pytubefix(url: str, output_dir: str, video_id: str, progress_cb=None) -> dict:
     from pytubefix import YouTube
+    import requests
 
     def _download():
-        yt = YouTube(url)
+        def _on_progress(stream, chunk, bytes_remaining):
+            if progress_cb and getattr(stream, "filesize", 0):
+                progress_cb((stream.filesize - bytes_remaining) / stream.filesize * 100)
+
+        yt = YouTube(url, on_progress_callback=_on_progress)
         title = yt.title or "Unknown"
         duration = yt.length or 0
+        thumbnail_url = yt.thumbnail_url
 
         stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
         if not stream:
@@ -748,10 +789,23 @@ async def download_with_pytubefix(url: str, output_dir: str, video_id: str) -> d
         output_path = os.path.join(output_dir, f"{video_id}.mp4")
         stream.download(output_path=output_dir, filename=f"{video_id}.mp4")
 
+        # Save thumbnail if available
+        thumbnail_path = None
+        if thumbnail_url:
+            try:
+                thumbnail_response = requests.get(thumbnail_url)
+                if thumbnail_response.status_code == 200:
+                    thumbnail_path = os.path.join(output_dir, f"{video_id}.jpg")
+                    with open(thumbnail_path, 'wb') as f:
+                        f.write(thumbnail_response.content)
+            except Exception as e:
+                logger.warning(f"Failed to download thumbnail: {str(e)}")
+
         return {
             "title": title,
             "duration": duration,
             "video_path": output_path,
+            "thumbnail_path": thumbnail_path,
         }
 
     loop = asyncio.get_event_loop()
@@ -997,7 +1051,7 @@ def get_douyin_ydl_opts(url: str, video_id: str, output_dir: str, cookies_file: 
     return get_platform_ydl_opts(url, video_id, output_dir, cookies_file, "douyin")
 
 
-async def download_with_ytdlp(url: str, output_dir: str, video_id: str) -> dict:
+async def download_with_ytdlp(url: str, output_dir: str, video_id: str, progress_cb=None) -> dict:
     import yt_dlp
 
     platform = detect_platform(url)
@@ -1005,6 +1059,20 @@ async def download_with_ytdlp(url: str, output_dir: str, video_id: str) -> dict:
 
     # Get platform-specific options using the new unified function
     base_ydl_opts = get_platform_ydl_opts(url, video_id, output_dir, cookies_file, platform)
+
+    # Surface download progress (percent of the current file) to the caller.
+    if progress_cb:
+        def _progress_hook(d):
+            status = d.get("status")
+            if status == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate")
+                downloaded = d.get("downloaded_bytes") or 0
+                if total:
+                    progress_cb(downloaded / total * 100)
+            elif status == "finished":
+                progress_cb(99.0)
+
+        base_ydl_opts["progress_hooks"] = [_progress_hook]
 
     # Define fallback format options for each platform
     platform_fallback_formats = {
@@ -1106,7 +1174,13 @@ def get_cookies_file(platform: str = None) -> str | None:
     return None
 
 
-async def download_video(url: str, output_dir: str = "temp") -> dict:
+async def download_video(url: str, output_dir: str = str(TEMP_DIR), progress_cb=None) -> dict:
+    """Download a video from ``url``.
+
+    ``progress_cb`` (optional) receives the current file's download percentage
+    (0-100). It may be invoked from worker threads, so implementations must be
+    thread-safe.
+    """
     os.makedirs(output_dir, exist_ok=True)
     video_id = str(uuid.uuid4())[:8]
     platform = detect_platform(url)
@@ -1134,7 +1208,7 @@ async def download_video(url: str, output_dir: str = "temp") -> dict:
             else:
                 logger.info(f"Found Douyin cookies: {cookies_file}")
 
-            result = await download_douyin_by_api(url, output_dir, video_id)
+            result = await download_douyin_by_api(url, output_dir, video_id, progress_cb=progress_cb)
 
             thumbnail_file = None
             for f in os.listdir(output_dir):
@@ -1174,7 +1248,7 @@ async def download_video(url: str, output_dir: str = "temp") -> dict:
             else:
                 logger.info(f"Found TikTok cookies: {cookies_file}")
 
-            result = await download_tiktok_by_api(url, output_dir, video_id)
+            result = await download_tiktok_by_api(url, output_dir, video_id, progress_cb=progress_cb)
 
             thumbnail_file = None
             for f in os.listdir(output_dir):
@@ -1197,7 +1271,7 @@ async def download_video(url: str, output_dir: str = "temp") -> dict:
     if platform == "youtube":
         try:
             logger.info("Trying pytubefix for YouTube...")
-            result = await download_with_pytubefix(url, output_dir, video_id)
+            result = await download_with_pytubefix(url, output_dir, video_id, progress_cb=progress_cb)
 
             video_file = None
             for f in os.listdir(output_dir):
@@ -1246,16 +1320,16 @@ async def download_video(url: str, output_dir: str = "temp") -> dict:
             else:
                 logger.info(f"Found {platform} cookies: {cookies_file}")
 
-        # For Douyin, convert theater/collection URLs to direct video URLs for yt-dlp
+        # For Douyin, convert jingxuan/collection URLs to direct video URLs for yt-dlp
         ytdlp_url = url
         if platform == "douyin":
             video_id = extract_douyin_video_id(url)
-            if video_id and "jingxuan/theater" in url:
-                # Convert theater URL to direct video URL
+            if video_id and ("jingxuan" in url or "modal_id" in url):
+                # Convert collection/jingxuan URL to direct video URL
                 ytdlp_url = f"https://www.douyin.com/video/{video_id}"
-                logger.info(f"Converted theater URL to direct video URL: {ytdlp_url}")
+                logger.info(f"Converted collection URL to direct video URL: {ytdlp_url}")
 
-        result = await download_with_ytdlp(ytdlp_url, output_dir, video_id)
+        result = await download_with_ytdlp(ytdlp_url, output_dir, video_id, progress_cb=progress_cb)
 
         thumbnail_file = None
         for f in os.listdir(output_dir):
@@ -1277,7 +1351,7 @@ async def download_video(url: str, output_dir: str = "temp") -> dict:
     if platform not in ["youtube", "douyin"]:
         try:
             logger.info("Trying pytubefix as fallback...")
-            result = await download_with_pytubefix(url, output_dir, video_id)
+            result = await download_with_pytubefix(url, output_dir, video_id, progress_cb=progress_cb)
 
             video_file = None
             for f in os.listdir(output_dir):
@@ -1350,7 +1424,7 @@ def get_video_duration(video_path: str) -> float:
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", video_path],
-        capture_output=True, text=True
+        capture_output=True, text=True, **hidden_subprocess_kwargs()
     )
     try:
         return float(result.stdout.strip())

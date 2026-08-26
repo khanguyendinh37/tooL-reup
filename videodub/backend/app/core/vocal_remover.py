@@ -3,6 +3,8 @@ import os
 import shutil
 import logging
 
+from app.core.process_utils import hidden_subprocess_kwargs
+
 logger = logging.getLogger(__name__)
 
 
@@ -17,7 +19,7 @@ def separate_vocals(video_path: str, output_dir: str) -> dict:
         subprocess.run(
             ["ffmpeg", "-i", video_path, "-vn", "-acodec", "pcm_s16le",
              "-ar", "44100", "-ac", "2", audio_path, "-y"],
-            capture_output=True, check=True
+            capture_output=True, check=True, **hidden_subprocess_kwargs()
         )
     except subprocess.CalledProcessError as e:
         logger.error(f"Failed to extract audio: {e}")
@@ -27,12 +29,13 @@ def separate_vocals(video_path: str, output_dir: str) -> dict:
     os.makedirs(separated_dir, exist_ok=True)
 
     no_vocals_path = None
+    vocals_path = None
 
     try:
         # Run Demucs for vocal separation
         result = subprocess.run(
             ["demucs", "--two-stems", "vocals", "-o", separated_dir, audio_path],
-            capture_output=True, text=True, timeout=600
+            capture_output=True, text=True, timeout=600, **hidden_subprocess_kwargs()
         )
 
         if result.returncode != 0:
@@ -69,7 +72,7 @@ def separate_vocals(video_path: str, output_dir: str) -> dict:
                 filter_str = "".join(f"[{i}:a]" for i in range(n_inputs))
                 filter_str += f"amix=inputs={n_inputs}:duration=first[out]"
                 mix_cmd.extend(["-filter_complex", filter_str, "-map", "[out]", "-y", no_vocals_path])
-                subprocess.run(mix_cmd, capture_output=True, check=True)
+                subprocess.run(mix_cmd, capture_output=True, check=True, **hidden_subprocess_kwargs())
             else:
                 no_vocals_path = None
 
@@ -82,7 +85,7 @@ def separate_vocals(video_path: str, output_dir: str) -> dict:
                 "ffmpeg", "-i", audio_path,
                 "-af", "pan=stereo|c0=c0-c1|c1=c1-c0",
                 "-y", no_vocals_path
-            ], capture_output=True, check=True)
+            ], capture_output=True, check=True, **hidden_subprocess_kwargs())
         except subprocess.CalledProcessError as e:
             logger.error(f"Fallback vocal removal failed: {e}")
             no_vocals_path = None
@@ -92,6 +95,6 @@ def separate_vocals(video_path: str, output_dir: str) -> dict:
         os.remove(audio_path)
 
     return {
-        "vocals": None,  # We don't need the vocals track
+        "vocals": vocals_path if vocals_path and os.path.exists(vocals_path) else None,
         "no_vocals": no_vocals_path if no_vocals_path and os.path.exists(no_vocals_path) else None,
     }

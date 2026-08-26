@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react'
-import { Settings2, Mic2, Globe, Volume2, Save, RotateCcw, CheckCircle2, Cookie, Upload, Trash2 } from 'lucide-react'
+import { Settings2, Mic2, Globe, Volume2, Save, RotateCcw, CheckCircle2, Cookie, Upload, Trash2, Bell, FileText } from 'lucide-react'
 import { WHISPER_MODELS, TTS_VOICES, LANGUAGES } from '@/lib/utils'
-import { getAllCookiesStatus, uploadCookies, deleteCookies, getSettings, updateSettings } from '@/lib/api'
+import { getAllCookiesStatus, uploadCookies, deleteCookies, getSettings, testTranslationConnection, updateSettings } from '@/lib/api'
+import TranslationAiRoute from '@/components/settings/TranslationAiRoute'
+import { getTranslationProvider, type TranslationConnectionStatus, type TranslationModelOption, type TranslationProviderId } from '@/lib/translation'
 
 interface PlatformCookies {
   platform: string
@@ -12,16 +14,35 @@ interface PlatformCookies {
 
 interface AppSettings {
   whisper_model: string
+  default_source_lang: string
   default_target_lang: string
   default_voice: string
   tts_speed: string
+  notifications_enabled: boolean
+  default_dubbing_volume: number
+  default_background_volume: number
+  default_original_volume: number
+  subtitle_enabled: boolean | string
+  subtitle_position?: string
+  subtitle_size?: string
+  subtitle_color?: string
+  blur_existing_subtitles: boolean | string
+  translation_provider?: TranslationProviderId
+  translation_model?: string
+  translation_endpoint?: string
+  translation_api_key_set?: boolean
+  translation_api_key_hint?: string
+  translation_key_verified?: boolean
+  translation_models?: TranslationModelOption[]
 }
 
 export default function Settings() {
   const [whisperModel, setWhisperModel] = useState('small')
+  const [defaultSourceLang, setDefaultSourceLang] = useState('en')
   const [defaultTargetLang, setDefaultTargetLang] = useState('vi')
   const [ttsSpeed, setTtsSpeed] = useState(1)
   const [selectedVoice, setSelectedVoice] = useState('vi-VN-HoaiMyNeural')
+  const [notificationsEnabled, setNotificationsEnabled] = useState(true)
   const [saved, setSaved] = useState(false)
   const [saving, setSaving] = useState(false)
   const [platforms, setPlatforms] = useState<PlatformCookies[]>([])
@@ -29,6 +50,26 @@ export default function Settings() {
   const [cookiesText, setCookiesText] = useState('')
   const [cookiesMessage, setCookiesMessage] = useState('')
   const [loading, setLoading] = useState(false)
+  const [dubbingVolume, setDubbingVolume] = useState(2.0)
+  const [backgroundVolume, setBackgroundVolume] = useState(1.0)
+  const [originalVocalsVolume, setOriginalVocalsVolume] = useState(0.1)
+  const [subtitleEnabled, setSubtitleEnabled] = useState(false)
+  const [subtitlePosition, setSubtitlePosition] = useState('bottom')
+  const [subtitleSize, setSubtitleSize] = useState('small')
+  const [subtitleColor, setSubtitleColor] = useState('white')
+  const [blurExistingSubtitles, setBlurExistingSubtitles] = useState(false)
+  const [translationProvider, setTranslationProvider] = useState<TranslationProviderId>('google')
+  const [translationModel, setTranslationModel] = useState('google-free')
+  const [translationEndpoint, setTranslationEndpoint] = useState('')
+  const [translationApiKeySet, setTranslationApiKeySet] = useState(false)
+  const [translationApiKeyHint, setTranslationApiKeyHint] = useState('')
+  const [translationApiKeyDraft, setTranslationApiKeyDraft] = useState('')
+  const [translationClearApiKey, setTranslationClearApiKey] = useState(false)
+  const [translationModels, setTranslationModels] = useState<TranslationModelOption[]>([])
+  const [translationModelsUnlocked, setTranslationModelsUnlocked] = useState(true)
+  const [translationConnectionStatus, setTranslationConnectionStatus] = useState<TranslationConnectionStatus>('idle')
+  const [translationConnectionMessage, setTranslationConnectionMessage] = useState('')
+  const [settingsError, setSettingsError] = useState('')
 
   // Load settings on mount
   useEffect(() => {
@@ -40,11 +81,49 @@ export default function Settings() {
     try {
       const settings = await getSettings() as AppSettings
       setWhisperModel(settings.whisper_model || 'small')
+      setDefaultSourceLang(settings.default_source_lang || 'en')
       setDefaultTargetLang(settings.default_target_lang || 'vi')
       setSelectedVoice(settings.default_voice || 'vi-VN-HoaiMyNeural')
       setTtsSpeed(parseFloat(settings.tts_speed || '1.0'))
+      setNotificationsEnabled(String(settings.notifications_enabled) === 'true')
+      setDubbingVolume(parseFloat(String(settings.default_dubbing_volume ?? 2.0)))
+      setBackgroundVolume(parseFloat(String(settings.default_background_volume ?? 1.0)))
+      setOriginalVocalsVolume(parseFloat(String(settings.default_original_volume ?? 0.1)))
+      setSubtitleEnabled(settings.subtitle_enabled === true || settings.subtitle_enabled === 'true')
+      const subPos = settings.subtitle_position ?? 'bottom'
+      const subSize = settings.subtitle_size ?? 'small'
+      const subColor = settings.subtitle_color ?? 'white'
+      setSubtitlePosition(subPos)
+      setSubtitleSize(subSize)
+      setSubtitleColor(subColor)
+      setBlurExistingSubtitles(
+        settings.blur_existing_subtitles === true || settings.blur_existing_subtitles === 'true'
+      )
+      setTranslationProvider((settings.translation_provider as TranslationProviderId) || 'google')
+      setTranslationModel(settings.translation_model || getTranslationProvider(settings.translation_provider).defaultModel)
+      setTranslationEndpoint(settings.translation_endpoint || '')
+      const hasSavedTranslationKey = Boolean(settings.translation_api_key_set)
+      const savedTranslationModels = Array.isArray(settings.translation_models)
+        ? settings.translation_models as TranslationModelOption[]
+        : []
+      const savedTranslationVerified = Boolean(settings.translation_key_verified)
+      const savedTranslationProvider = (settings.translation_provider as TranslationProviderId) || 'google'
+      setTranslationProvider(savedTranslationProvider)
+      setTranslationModel(settings.translation_model || getTranslationProvider(savedTranslationProvider).defaultModel)
+      setTranslationEndpoint(settings.translation_endpoint || '')
+      setTranslationApiKeySet(hasSavedTranslationKey)
+      setTranslationApiKeyHint(settings.translation_api_key_hint || '')
+      setTranslationModels(savedTranslationModels)
+      setTranslationModelsUnlocked(savedTranslationProvider === 'google' || (hasSavedTranslationKey && savedTranslationVerified && savedTranslationModels.length > 0))
+      setTranslationConnectionStatus(savedTranslationProvider !== 'google' && hasSavedTranslationKey && savedTranslationVerified && savedTranslationModels.length > 0 ? 'connected' : 'idle')
+      setTranslationConnectionMessage(savedTranslationProvider !== 'google' && hasSavedTranslationKey && savedTranslationVerified
+        ? `Đã tải ${savedTranslationModels.length} model đã xác thực.`
+        : '')
+      setTranslationApiKeyDraft('')
+      setTranslationClearApiKey(false)
     } catch (err) {
       console.error('Failed to load settings:', err)
+      setSettingsError('Không tải được cấu hình đã lưu. Thử lại sau.')
     }
   }
 
@@ -57,43 +136,153 @@ export default function Settings() {
 
   const handleSave = async () => {
     setSaving(true)
+    setSettingsError('')
     try {
       await updateSettings({
         whisper_model: whisperModel,
+        default_source_lang: defaultSourceLang,
         default_target_lang: defaultTargetLang,
         default_voice: selectedVoice,
         tts_speed: ttsSpeed.toString(),
+        notifications_enabled: notificationsEnabled,
+        default_dubbing_volume: dubbingVolume,
+        default_background_volume: backgroundVolume,
+        default_original_volume: originalVocalsVolume,
+        subtitle_enabled: subtitleEnabled,
+        subtitle_position: subtitlePosition,
+        subtitle_size: subtitleSize,
+        subtitle_color: subtitleColor,
+        blur_existing_subtitles: blurExistingSubtitles,
+        translation_provider: translationProvider,
+        translation_model: translationModel,
+        translation_endpoint: translationEndpoint,
+        translation_key_verified: translationProvider === 'google'
+          ? false
+          : translationConnectionStatus === 'connected' && translationModelsUnlocked,
+        translation_models: translationProvider === 'google' ? [] : translationModels,
+        ...(translationApiKeyDraft.trim() ? { translation_api_key: translationApiKeyDraft.trim() } : {}),
+        ...(translationClearApiKey ? { translation_clear_api_key: true } : {}),
       })
+      if (translationApiKeyDraft.trim()) {
+        setTranslationApiKeySet(true)
+        setTranslationApiKeyHint(`••••${translationApiKeyDraft.trim().slice(-4)}`)
+      }
+      if (translationClearApiKey) {
+        setTranslationApiKeySet(false)
+        setTranslationApiKeyHint('')
+      }
+      setTranslationApiKeyDraft('')
+      setTranslationClearApiKey(false)
+      setTranslationConnectionStatus(translationProvider === 'google' ? 'idle' : translationConnectionStatus)
+      setTranslationConnectionMessage(translationProvider === 'google' ? '' : translationConnectionMessage)
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } catch (err) {
       console.error('Failed to save settings:', err)
-      setCookiesMessage('Lỗi khi lưu cài đặt')
-      setTimeout(() => setCookiesMessage(''), 3000)
+      setSettingsError(err instanceof Error ? err.message : 'Không thể lưu cài đặt. Thử lại.')
     } finally {
       setSaving(false)
     }
   }
 
+  const handleConnectTranslation = async () => {
+    setTranslationConnectionStatus('connecting')
+    setTranslationModelsUnlocked(false)
+    setTranslationConnectionMessage('')
+    try {
+      const result = await testTranslationConnection({
+        translation_provider: translationProvider,
+        translation_model: translationModel || undefined,
+        translation_endpoint: translationEndpoint,
+        ...(translationApiKeyDraft.trim() ? { translation_api_key: translationApiKeyDraft.trim() } : {}),
+      })
+      if (result.ok && !result.used_fallback && result.models.length > 0) {
+        const selectedModel = result.model || result.models[0].id
+        setTranslationModels(result.models)
+        setTranslationModelsUnlocked(true)
+        setTranslationModel(selectedModel)
+        setTranslationApiKeySet(true)
+        setTranslationApiKeyHint(
+          translationApiKeyDraft.trim()
+            ? `••••${translationApiKeyDraft.trim().slice(-4)}`
+            : translationApiKeyHint,
+        )
+        setTranslationConnectionStatus('connected')
+        setTranslationConnectionMessage(`Đã tải ${result.models.length} model phù hợp và đã lưu route.`)
+      } else {
+        setTranslationModels([])
+        setTranslationModelsUnlocked(false)
+        setTranslationConnectionStatus('error')
+        setTranslationConnectionMessage(result.message || 'Không thể xác thực API key. Google Translate vẫn được dùng làm dự phòng.')
+      }
+    } catch (err) {
+      setTranslationModels([])
+      setTranslationModelsUnlocked(false)
+      setTranslationConnectionStatus('error')
+      setTranslationConnectionMessage(err instanceof Error ? err.message : 'Không thể xác thực API key. Google Translate vẫn được dùng làm dự phòng.')
+    }
+  }
+
   const handleReset = async () => {
+    setSettingsError('')
     // Reset to defaults
     setWhisperModel('small')
+    setDefaultSourceLang('en')
     setDefaultTargetLang('vi')
     setSelectedVoice('vi-VN-HoaiMyNeural')
     setTtsSpeed(1)
+    setNotificationsEnabled(true)
+    localStorage.setItem('notificationsEnabled', JSON.stringify(true))
+    setDubbingVolume(1.0)
+    setBackgroundVolume(1.0)
+    setOriginalVocalsVolume(0.3)
+    setSubtitleEnabled(false)
+    setSubtitlePosition('bottom')
+    setSubtitleSize('small')
+    setSubtitleColor('white')
+    setBlurExistingSubtitles(false)
+    setTranslationProvider('google')
+    setTranslationModel('google-free')
+    setTranslationEndpoint('')
+    setTranslationApiKeyDraft('')
+    setTranslationApiKeySet(false)
+    setTranslationApiKeyHint('')
+    setTranslationClearApiKey(true)
+    setTranslationModels([])
+    setTranslationModelsUnlocked(true)
+    setTranslationConnectionStatus('idle')
+    setTranslationConnectionMessage('')
 
     // Also persist to backend
     try {
       await updateSettings({
         whisper_model: 'small',
+        default_source_lang: 'en',
         default_target_lang: 'vi',
         default_voice: 'vi-VN-HoaiMyNeural',
         tts_speed: '1.0',
+        notifications_enabled: true,
+        default_dubbing_volume: 1.0,
+        default_background_volume: 1.0,
+        default_original_volume: 0.3,
+        subtitle_enabled: false,
+        subtitle_position: 'bottom',
+        subtitle_size: 'small',
+        subtitle_color: 'white',
+        blur_existing_subtitles: false,
+        translation_provider: 'google',
+        translation_model: 'google-free',
+        translation_endpoint: '',
+        translation_key_verified: false,
+        translation_models: [],
+        translation_clear_api_key: true,
       })
+      setTranslationClearApiKey(false)
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } catch (err) {
       console.error('Failed to reset settings:', err)
+      setSettingsError(err instanceof Error ? err.message : 'Không thể đặt lại cài đặt. Thử lại.')
     }
   }
 
@@ -106,8 +295,9 @@ export default function Settings() {
       setCookiesText('')
       loadCookiesStatus()
       setTimeout(() => setCookiesMessage(''), 3000)
-    } catch {
-      setCookiesMessage('Lỗi khi lưu cookies')
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Lỗi khi lưu cookies'
+      setCookiesMessage(errorMsg)
     } finally {
       setLoading(false)
     }
@@ -153,6 +343,9 @@ export default function Settings() {
           </button>
         </div>
       </div>
+      {settingsError && (
+        <p role="alert" className="-mt-3 text-sm text-red-300">{settingsError}</p>
+      )}
 
       {/* Whisper Settings */}
       <div className="glass-card">
@@ -185,6 +378,171 @@ export default function Settings() {
             </button>
           ))}
         </div>
+      </div>
+
+      {/* Audio Mix Controls */}
+      <div className="glass-card">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-10 h-10 rounded-xl bg-emerald-500/20 flex items-center justify-center">
+            <Volume2 className="w-5 h-5 text-emerald-400" />
+          </div>
+          <div>
+            <h3 className="font-semibold text-surface-100">Audio Mix Controls</h3>
+            <p className="text-sm text-surface-500">Điều chỉnh âm lượng khi ghép video</p>
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          {/* Dubbing Volume - Controls dubbed_audio_boosted.wav */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-sm text-surface-400">Dubbing Volume (dubbed_audio_boosted.wav)</label>
+              <span className="text-sm text-surface-500">{dubbingVolume.toFixed(1)}</span>
+            </div>
+            <input
+              type="range"
+              min="0.5"
+              max="2.0"
+              step="0.1"
+              value={dubbingVolume}
+              onChange={(e) => setDubbingVolume(parseFloat(e.target.value))}
+              className="w-full"
+            />
+          </div>
+
+          {/* Background Volume - Controls no_vocals_normalized.wav */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-sm text-surface-400">Background Volume (no_vocals_normalized.wav)</label>
+              <span className="text-sm text-surface-500">{backgroundVolume.toFixed(1)}</span>
+            </div>
+            <input
+              type="range"
+              min="0.5"
+              max="2.0"
+              step="0.1"
+              value={backgroundVolume}
+              onChange={(e) => setBackgroundVolume(parseFloat(e.target.value))}
+              className="w-full"
+            />
+          </div>
+
+          {/* Original Volume - Controls vocals in final_audio.wav */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-sm text-surface-400">Original Volume (vocals in final_audio.wav)</label>
+              <span className="text-sm text-surface-500">{originalVocalsVolume.toFixed(2)}</span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="1.0"
+              step="0.05"
+              value={originalVocalsVolume}
+              onChange={(e) => setOriginalVocalsVolume(parseFloat(e.target.value))}
+              className="w-full"
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Subtitle Settings */}
+      <div className="glass-card">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-10 h-10 rounded-xl bg-primary-500/20 flex items-center justify-center">
+            <FileText className="w-5 h-5 text-primary-400" />
+          </div>
+          <div>
+            <h3 className="font-semibold text-surface-100">Phụ đề</h3>
+            <p className="text-sm text-surface-500">Chèn phụ đề đã dịch vào video lồng tiếng</p>
+          </div>
+        </div>
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <p className="font-medium text-surface-100">Thêm phụ đề vào video</p>
+            <p className="text-sm text-surface-500">Chèn phụ đề 13 px; có thể làm mờ toàn bộ dải phụ đề cũ phía dưới</p>
+          </div>
+          <label className="relative inline-flex items-center cursor-pointer">
+            <input
+              type="checkbox"
+              checked={subtitleEnabled}
+              onChange={(e) => setSubtitleEnabled(e.target.checked)}
+              className="sr-only peer"
+            />
+            <div className="w-11 h-6 bg-surface-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-primary-500/30 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600"></div>
+          </label>
+        </div>
+        <div className="flex items-center justify-between mt-4 pt-4 border-t border-surface-700/50">
+          <div>
+            <label htmlFor="settings-blur-existing-subtitles" className="font-medium text-surface-100 cursor-pointer">
+              Video có phụ đề cũ đã in sẵn
+            </label>
+            <p id="settings-blur-existing-subtitles-help" className="text-sm text-surface-500">
+              Làm mờ toàn bộ dải phụ đề cũ phía dưới trước khi chèn phụ đề mới 13 px
+            </p>
+          </div>
+          <input
+            id="settings-blur-existing-subtitles"
+            type="checkbox"
+            checked={blurExistingSubtitles}
+            onChange={(e) => setBlurExistingSubtitles(e.target.checked)}
+            disabled={!subtitleEnabled}
+            aria-describedby="settings-blur-existing-subtitles-help"
+            className="w-4 h-4 rounded accent-primary-500 disabled:opacity-40"
+          />
+        </div>
+        {subtitleEnabled && (
+          <div className="pt-4 border-t border-surface-700/50 space-y-4">
+            <div>
+              <label className="text-sm text-surface-400 mb-2 block">Vị trí phụ đề</label>
+              <div className="flex gap-2">
+                {['top', 'center', 'bottom'].map((pos) => (
+                  <button
+                    key={pos}
+                    onClick={() => setSubtitlePosition(pos)}
+                    className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-all ${
+                      subtitlePosition === pos
+                        ? 'bg-primary-500/20 text-primary-400 border border-primary-500/30'
+                        : 'bg-surface-800 text-surface-400 border border-surface-700 hover:border-surface-600'
+                    }`}
+                  >
+                    {pos === 'top' ? '👆 Trên' : pos === 'center' ? '⬜ Giữa' : '⬇️ Dưới'}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="text-sm text-surface-400 mb-2 block">Kích thước chữ</label>
+              <div className="py-2 px-3 rounded-lg text-sm font-medium text-primary-400 border border-primary-500/30 bg-primary-500/10">
+                13 px (cố định, phù hợp vùng phụ đề phía dưới)
+              </div>
+            </div>
+            <div>
+              <label className="text-sm text-surface-400 mb-2 block">Màu chữ</label>
+              <div className="flex gap-2">
+                {[
+                  { value: 'white', label: 'Trắng', color: '#FFFFFF' },
+                  { value: 'yellow', label: 'Vàng', color: '#FFD700' },
+                  { value: 'cyan', label: 'Xanh', color: '#00FFFF' },
+                  { value: 'red', label: 'Đỏ', color: '#FF4444' },
+                ].map((c) => (
+                  <button
+                    key={c.value}
+                    onClick={() => setSubtitleColor(c.value)}
+                    className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2 ${
+                      subtitleColor === c.value
+                        ? 'bg-primary-500/20 text-primary-400 border border-primary-500/30'
+                        : 'bg-surface-800 text-surface-400 border border-surface-700 hover:border-surface-600'
+                    }`}
+                  >
+                    <span className="w-3 h-3 rounded-full" style={{ backgroundColor: c.color }} />
+                    {c.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* TTS Settings */}
@@ -239,20 +597,37 @@ export default function Settings() {
 
       {/* Translation Settings */}
       <div className="glass-card">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="w-10 h-10 rounded-xl bg-accent-purple/20 flex items-center justify-center">
-            <Globe className="w-5 h-5 text-accent-purple" />
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-accent-purple/20">
+            <Globe className="h-5 w-5 text-accent-purple" aria-hidden="true" />
           </div>
           <div>
-            <h3 className="font-semibold text-surface-100">Dịch thuật (Google Translate)</h3>
-            <p className="text-sm text-surface-500">Cài đặt ngôn ngữ mặc định</p>
+            <h3 className="font-semibold text-surface-100">Dịch thuật</h3>
+            <p className="text-sm text-surface-500">Chọn ngôn ngữ và cách dịch mặc định</p>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="mt-6 grid grid-cols-1 gap-4 rounded-xl bg-surface-800/35 p-4 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-end md:gap-3">
           <div>
-            <label className="text-sm text-surface-400 mb-2 block">Ngôn ngữ đích mặc định</label>
+            <label htmlFor="default-source-language" className="mb-2 block text-sm text-surface-400">Ngôn ngữ nguồn mặc định</label>
             <select
+              id="default-source-language"
+              value={defaultSourceLang}
+              onChange={(e) => setDefaultSourceLang(e.target.value)}
+              className="glass-input w-full appearance-none cursor-pointer"
+            >
+              {LANGUAGES.map(lang => (
+                <option key={lang.code} value={lang.code}>
+                  {lang.flag} {lang.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex justify-center text-surface-600 md:pb-3" aria-hidden="true">→</div>
+          <div>
+            <label htmlFor="default-target-language" className="mb-2 block text-sm text-surface-400">Ngôn ngữ đích mặc định</label>
+            <select
+              id="default-target-language"
               value={defaultTargetLang}
               onChange={(e) => setDefaultTargetLang(e.target.value)}
               className="glass-input w-full appearance-none cursor-pointer"
@@ -264,14 +639,88 @@ export default function Settings() {
               ))}
             </select>
           </div>
+        </div>
 
-          <div>
-            <label className="text-sm text-surface-400 mb-2 block">Engine dịch thuật</label>
-            <div className="glass-input !bg-emerald-500/10 !border-emerald-500/30 !text-emerald-400 flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4" />
-              Google Translate (Miễn phí, không cần API key)
-            </div>
+        <TranslationAiRoute
+          provider={translationProvider}
+          model={translationModel}
+          endpoint={translationEndpoint}
+          hasSavedKey={translationApiKeySet}
+          apiKeyDraft={translationApiKeyDraft}
+          apiKeyHint={translationApiKeyHint}
+          clearApiKey={translationClearApiKey}
+          models={translationModels}
+          modelsUnlocked={translationModelsUnlocked}
+          connectionStatus={translationConnectionStatus}
+          connectionMessage={translationConnectionMessage}
+          onProviderChange={(nextProvider) => {
+            setTranslationProvider(nextProvider)
+            setTranslationModel(getTranslationProvider(nextProvider).defaultModel)
+            setTranslationModels([])
+            setTranslationModelsUnlocked(nextProvider === 'google')
+            setTranslationConnectionStatus('idle')
+            setTranslationConnectionMessage('')
+          }}
+          onModelChange={(nextModel) => {
+            setTranslationModel(nextModel)
+          }}
+          onEndpointChange={(nextEndpoint) => {
+            setTranslationEndpoint(nextEndpoint)
+            setTranslationModels([])
+            setTranslationModelsUnlocked(false)
+            setTranslationConnectionStatus('idle')
+            setTranslationConnectionMessage('')
+          }}
+          onApiKeyChange={(nextKey) => {
+            setTranslationApiKeyDraft(nextKey)
+            setTranslationModels([])
+            setTranslationModelsUnlocked(false)
+            setTranslationConnectionStatus('idle')
+            setTranslationConnectionMessage('')
+          }}
+          onClearKeyChange={(clear) => {
+            setTranslationClearApiKey(clear)
+            if (clear) {
+              setTranslationModels([])
+              setTranslationModelsUnlocked(false)
+              setTranslationConnectionStatus('idle')
+              setTranslationConnectionMessage('')
+            }
+          }}
+          onConnect={() => void handleConnectTranslation()}
+        />
+      </div>
+
+      {/* Notification Settings */}
+      <div className="glass-card">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center">
+            <Bell className="w-5 h-5 text-amber-400" />
           </div>
+          <div>
+            <h3 className="font-semibold text-surface-100">Thông báo</h3>
+            <p className="text-sm text-surface-500">Cài đặt thông báo hoàn thành xử lý video</p>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="font-medium text-surface-100">Thông báo trình duyệt</p>
+            <p className="text-sm text-surface-500">Nhận thông báo và âm thanh khi video xử lý xong</p>
+          </div>
+          <label className="relative inline-flex items-center cursor-pointer">
+            <input
+              type="checkbox"
+              checked={notificationsEnabled}
+              onChange={(e) => {
+                const enabled = e.target.checked
+                setNotificationsEnabled(enabled)
+                localStorage.setItem('notificationsEnabled', JSON.stringify(enabled))
+              }}
+              className="sr-only peer"
+            />
+            <div className="w-11 h-6 bg-surface-700 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-primary-500/30 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600"></div>
+          </label>
         </div>
       </div>
 
@@ -381,7 +830,7 @@ export default function Settings() {
           </div>
 
           {cookiesMessage && (
-            <p className="text-sm text-emerald-400">{cookiesMessage}</p>
+            <p className={`text-sm ${cookiesMessage.includes('Lỗi') || cookiesMessage.includes('error') ? 'text-red-400' : 'text-emerald-400'}`}>{cookiesMessage}</p>
           )}
 
           <div className="text-xs text-surface-500 space-y-2 mt-4">

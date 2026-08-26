@@ -1,20 +1,111 @@
 import asyncio
 import os
 import subprocess
-import json
-import base64
-import tempfile
+import logging
+import time
 from datetime import datetime
 from sqlalchemy import update
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# FFmpeg's subtitles filter uses libass's default 384x288 script canvas for
+# SRT cues. Convert pixel geometry to this canvas before setting MarginV.
+ASS_PLAYRES_HEIGHT = 288
 
 from app.core.downloader import download_video, get_video_duration
+from app.core.paths import OUTPUT_DIR, TEMP_DIR
+from app.core.process_utils import hidden_subprocess_kwargs
 from app.core.transcriber import extract_audio, transcribe_with_whisper, segments_to_srt
+from app.core.translation_config import TranslationConfig, load_translation_config
 from app.core.translator import translate_srt_deep_translator, srt_to_segments
-from app.core.tts_engine import generate_dubbing_audio, merge_tts_segments
+from app.core.tts_engine import cleanup_tts_directory, generate_dubbing_audio, merge_tts_segments
 from app.core.vocal_remover import separate_vocals
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.database import DubbingJob
+from app.models.database import DubbingJob, async_session
+
+
+def hex_to_ass(color: str, default: str = "FFFFFF") -> str:
+    """Convert a CSS hex color to the BGR hex format expected by libass."""
+    if not isinstance(color, str):
+        return default
+
+    value = color.strip()
+    if value.startswith("#"):
+        value = value[1:]
+    elif value.upper().startswith("&H"):
+        value = value[2:]
+        # Accept ASS AARRGGBB input and discard the alpha component here.
+        if len(value) == 8:
+            value = value[2:]
+
+    if len(value) == 3:
+        value = "".join(char * 2 for char in value)
+
+    if len(value) != 6 or any(char not in "0123456789abcdefABCDEF" for char in value):
+        return default
+
+    red, green, blue = value[0:2], value[2:4], value[4:6]
+    return f"{blue}{green}{red}".upper()
+
+
+def _escape_ffmpeg_filter_path(path: str) -> str:
+    """Make a local path safe for FFmpeg's subtitles filter syntax."""
+    normalized = os.path.abspath(path).replace("\\", "/")
+    return normalized.replace("'", "\\'").replace(":", "\\:")
+
+
+def _coerce_bool(value: object, default: bool = False) -> bool:
+    """Parse booleans safely when configs come from JSON, forms, or the DB."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off", ""}:
+            return False
+    if value is None:
+        return default
+    return bool(value)
+
+
+def _normalize_audio_track(input_path: str, output_path: str, volume: float) -> str:
+    """Normalize a track first, then apply the user's gain multiplier.
+
+    Applying ``volume`` after ``loudnorm`` is important: applying it before
+    normalization causes loudnorm to undo the user's selected level.
+    """
+    gain = max(float(volume), 0.0)
+    subprocess.run([
+        "ffmpeg", "-i", input_path,
+        "-af", f"loudnorm=I=-23:TP=-2:LRA=11,volume={gain:.3f}",
+        "-ar", "44100", "-ac", "2", "-y", output_path,
+    ], capture_output=True, check=True, **hidden_subprocess_kwargs())
+    return output_path
+
+
+def _mix_audio_tracks(track_paths: list[str], output_path: str) -> str:
+    """Mix already-normalized tracks without changing their relative gains."""
+    if not track_paths:
+        raise ValueError("No audio tracks available for mixing")
+
+    cmd = ["ffmpeg"]
+    for track_path in track_paths:
+        cmd.extend(["-i", track_path])
+
+    labels = "".join(f"[{index}:a]" for index in range(len(track_paths)))
+    filter_complex = (
+        f"{labels}amix=inputs={len(track_paths)}:duration=longest:"
+        "dropout_transition=0:normalize=0,alimiter=limit=0.95[out]"
+    )
+    cmd.extend([
+        "-filter_complex", filter_complex,
+        "-map", "[out]", "-ar", "44100", "-ac", "2", "-y", output_path,
+    ])
+    subprocess.run(cmd, capture_output=True, check=True, **hidden_subprocess_kwargs())
+    return output_path
 
 
 def speed_to_rate(speed: float) -> str:
@@ -26,440 +117,581 @@ def speed_to_rate(speed: float) -> str:
     return f"{pct:+.0f}%"
 
 
-def hex_to_ass(hex_color: str) -> str:
-    """Convert #RRGGBB to BBGGRR hex (ASS format for force_style)"""
-    if not hex_color or not hex_color.startswith('#'):
-        return 'FFFFFF'  # Default white
-    hex_clean = hex_color.lstrip('#')
-    if len(hex_clean) == 6:
-        r, g, b = hex_clean[0:2], hex_clean[2:4], hex_clean[4:6]
-        return f'{b}{g}{r}'
-    return 'FFFFFF'
+def get_actual_video_dimensions(video_path: str) -> tuple[int, int]:
+    """Probe the actual video dimensions using ffprobe."""
+    try:
+        result = subprocess.run([
+            "ffprobe", "-v", "quiet",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "json",
+            video_path
+        ], capture_output=True, text=True, timeout=30, **hidden_subprocess_kwargs())
+        if result.returncode == 0:
+            import json as _json
+            data = _json.loads(result.stdout)
+            streams = data.get("streams", [])
+            if streams:
+                w = streams[0].get("width", 1920)
+                h = streams[0].get("height", 1080)
+                logger.info(f"Probed video dimensions: {w}x{h}")
+                return (w, h)
+    except Exception as e:
+        logger.warning(f"Failed to probe video dimensions: {e}")
+    return (1920, 1080)
 
 
-def get_video_dimensions(aspect_ratio: str, base_width: int = 1920) -> tuple[int, int]:
-    """Get video dimensions based on aspect ratio."""
-    ratios = {
-        "16:9": (1920, 1080),
-        "9:16": (1080, 1920),
-        "1:1": (1080, 1080),
-        "4:5": (1080, 1350),
-        "4:3": (1440, 1080),
-        "21:9": (2560, 1080),
-    }
-    return ratios.get(aspect_ratio, (1920, 1080))
+def burn_subtitles_with_blur_mask(
+    input_video: str,
+    srt_path: str,
+    output_video: str,
+    video_width: int,
+    video_height: int,
+    subtitle_config: dict
+) -> bool:
+    """Burn translated subtitles, optionally covering old burned-in captions."""
+    if not isinstance(subtitle_config, dict) or not subtitle_config.get("enabled", False):
+        return False
 
+    if not os.path.isfile(srt_path):
+        logger.warning(f"SRT file not found: {srt_path}")
+        return False
 
-def build_subtitle_filter(subtitle_config: dict) -> str:
-    """
-    Build FFmpeg subtitles filter with customizable styling.
+    try:
+        width = max(int(video_width), 1)
+        height = max(int(video_height), 1)
+        font_size = max(int(subtitle_config.get("font_size", 13)), 1)
+        outline_width = max(int(subtitle_config.get("outline_width", 1)), 0)
+        try:
+            position_y = min(max(float(subtitle_config.get("position_y", 0.94)), 0.0), 1.0)
+        except (TypeError, ValueError):
+            position_y = 0.94
+        blur_existing = _coerce_bool(
+            subtitle_config.get("blur_existing_subtitles", False)
+        )
+        # The reference video has a large, full-width burned-caption band. Keep
+        # enough vertical padding to cover glyphs above and below the new line.
+        blur_height_ratio = min(
+            max(float(subtitle_config.get("blur_height_ratio", 0.24)), 0.18), 0.35
+        )
+        blur_strength = max(float(subtitle_config.get("blur_strength", 34)), 0.0)
+        blur_steps = max(int(subtitle_config.get("blur_steps", 2)), 1)
 
-    subtitle_config keys (API format):
-    - font_family: Font name (e.g., 'Arial', 'DejaVu Sans')
-    - font_size: Font size in points
-    - font_color: Hex color (e.g., '#FFFFFF' for white)
-    - outline_color: Hex color for outline (e.g., '#000000' for black)
-    - outline_width: Outline width in pixels
-    - shadow_enabled: Whether shadow is enabled
-    - shadow_color: Hex color for shadow
-    - shadow_offset_x: Shadow X offset
-    - shadow_offset_y: Shadow Y offset
-    """
-    srt_path = subtitle_config.get('srt_path', '')
-    if not srt_path:
-        return ''
-
-    # Escape path for FFmpeg subtitles filter - Windows needs special handling
-    # Use forward slashes and escape colons
-    escaped_path = srt_path.replace('\\', '/').replace(':', '\\:')
-
-    # Default values - API format
-    font = subtitle_config.get('font_family', 'DejaVu Sans')
-    font_size = subtitle_config.get('font_size', 24)
-    font_color = hex_to_ass(subtitle_config.get('font_color', '#FFFFFF'))
-    outline_color = hex_to_ass(subtitle_config.get('outline_color', '#000000'))
-    outline_width = subtitle_config.get('outline_width', 2)
-
-    # Shadow
-    shadow_enabled = subtitle_config.get('shadow_enabled', True)
-    if shadow_enabled:
-        shadow_color = hex_to_ass(subtitle_config.get('shadow_color', '#000000'))
-        shadow_offset = subtitle_config.get('shadow_offset_x', 2)  # Use single offset value
-    else:
-        shadow_color = '000000'
-        shadow_offset = 0
-
-    # Build force_style for ASS subtitles - MUST be a single string, not a tuple!
-    # Valid force_style options for libass: FontName, FontSize, PrimaryColour, OutlineColour,
-    # Outline, Shadow, Alignment, MarginV, MarginL, MarginR, Bold, Italic, Underline, StrikeOut
-    force_style_parts = [
-        f"FontName={font}",
-        f"FontSize={font_size}",
-        f"PrimaryColour={font_color}",
-        f"OutlineColour={outline_color}",
-        f"Outline={outline_width}",
-    ]
-
-    if shadow_enabled and shadow_offset > 0:
-        force_style_parts.append(f"Shadow={shadow_offset}")
-        force_style_parts.append(f"ShadowColour={shadow_color}")
-
-    # Add alignment and margins if provided
-    alignment = subtitle_config.get('alignment', 2)
-    margin_v = subtitle_config.get('margin_v', 40)
-    margin_l = subtitle_config.get('margin_l', 20)
-    margin_r = subtitle_config.get('margin_r', 20)
-
-    force_style_parts.extend([
-        f"Alignment={alignment}",
-        f"MarginV={margin_v}",
-        f"MarginL={margin_l}",
-        f"MarginR={margin_r}",
-    ])
-
-    force_style = ",".join(force_style_parts)
-
-    # Return filter string with force_style wrapped in single quotes for proper parsing
-    return f"subtitles={escaped_path}:force_style='{force_style}'"
-
-
-def build_overlay_filters(subtitle_config: dict, video_width: int, video_height: int) -> list[str]:
-    """
-    Build FFmpeg overlay filters for text and image overlays.
-    Returns list of filter strings.
-    """
-    filters = []
-    overlay_idx = 0
-
-    # Text overlays
-    for text_overlay in subtitle_config.get('text_overlays', []):
-        if not text_overlay.get('text', '').strip():
-            continue
-
-        text = text_overlay['text'].replace("'", "\\'").replace(":", "\\:")
-        font = text_overlay.get('font_family', 'Arial')
-        font_size = text_overlay.get('font_size', 24)
-        font_color = text_overlay.get('font_color', '#FFFFFF')
-        outline_color = text_overlay.get('outline_color', '#000000')
-        outline_width = text_overlay.get('outline_width', 2)
-        shadow_enabled = text_overlay.get('shadow_enabled', True)
-        shadow_color = text_overlay.get('shadow_color', '#000000')
-        shadow_offset_x = text_overlay.get('shadow_offset_x', 2)
-        shadow_offset_y = text_overlay.get('shadow_offset_y', 2)
-
-        # Calculate position in pixels
-        x = text_overlay.get('x', 0.5)
-        y = text_overlay.get('y', 0.1)
-        x_px = int(x * video_width)
-        y_px = int(y * video_height)
-
-        # Build drawtext filter
-        # Convert colors to ASS format (BBGGRR)
-        font_color_ass = hex_to_ass(font_color)
-        outline_color_ass = hex_to_ass(outline_color)
-        shadow_color_ass = hex_to_ass(shadow_color)
-
-        # drawtext with box for background-like effect
-        drawtext = (
-            f"drawtext="
-            f"text='{text}':"
-            f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:"
-            f"fontcolor={font_color_ass}:"
-            f"fontsize={font_size}:"
-            f"x={x_px}:"
-            f"y={y_px}:"
+        # libass expects colors as opaque AABBGGRR values, not CSS #RRGGBB.
+        font_color = hex_to_ass(subtitle_config.get("font_color", "#FFFFFF"))
+        outline_color = hex_to_ass(
+            subtitle_config.get("outline_color", "#000000"), "000000"
         )
 
-        if outline_width > 0:
-            drawtext += f"borderw={outline_width}:bordercolor={outline_color_ass}:"
+        blur_region = subtitle_config.get("blur_region")
+        has_custom_blur_region = isinstance(blur_region, dict)
+        if blur_existing:
+            if has_custom_blur_region:
+                try:
+                    region_width = min(max(float(blur_region.get("width", 1.0)), 0.02), 1.0)
+                    region_height = min(max(float(blur_region.get("height", 0.24)), 0.02), 1.0)
+                    region_x = min(max(float(blur_region.get("x", 0.0)), 0.0), 1.0 - region_width)
+                    region_y = min(max(float(blur_region.get("y", 0.76)), 0.0), 1.0 - region_height)
+                    blur_x = min(max(int(round(width * region_x)), 0), max(width - 1, 0))
+                    blur_y = min(max(int(round(height * region_y)), 0), max(height - 1, 0))
+                    blur_width = max(min(int(round(width * region_width)), width - blur_x), 1)
+                    blur_height = max(min(int(round(height * region_height)), height - blur_y), 1)
+                except (TypeError, ValueError):
+                    has_custom_blur_region = False
 
-        if shadow_enabled:
-            drawtext += f"shadowx={shadow_offset_x}:shadowy={shadow_offset_y}:shadowcolor={shadow_color_ass}:"
+            if not has_custom_blur_region:
+                blur_height = min(
+                    max(int(round(height * blur_height_ratio)), font_size * 6),
+                    height,
+                )
+                blur_x = 0
+                blur_y = max(height - blur_height, 0)
+                blur_width = width
 
-        drawtext += "font='Arial'"
-
-        filters.append(f"[v{overlay_idx}]{drawtext}[v{overlay_idx + 1}]")
-        overlay_idx += 1
-
-    # Image overlays (logos, watermarks)
-    for img_overlay in subtitle_config.get('image_overlays', []):
-        image_data = img_overlay.get('image_data')
-        image_url = img_overlay.get('image_url')
-
-        if not image_data and not image_url:
-            continue
-
-        # Save base64 image to temp file if needed
-        if image_data:
-            # Remove data URL prefix if present
-            if image_data.startswith('data:'):
-                image_data = image_data.split(',', 1)[1]
-            try:
-                img_bytes = base64.b64decode(image_data)
-                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-                    f.write(img_bytes)
-                    img_path = f.name
-            except Exception:
-                continue
         else:
-            img_path = image_url
+            blur_x = 0
+            blur_width = 0
+            blur_height = 0
+            blur_y = height
 
-        # Calculate position and size
-        x = img_overlay.get('x', 0.9)
-        y = img_overlay.get('y', 0.1)
-        scale = img_overlay.get('scale', 0.15)
-        opacity = img_overlay.get('opacity', 1.0)
-        rotation = img_overlay.get('rotation', 0.0)
-
-        x_px = int(x * video_width)
-        y_px = int(y * video_height)
-
-        # Build overlay filter
-        # Use scale relative to video width
-        overlay_filter = (
-            f"movie={img_path}:loop=0,"
-            f"scale={int(video_width * scale)}:-1,"
-            f"rotate={rotation}*PI/180,"
-            f"format=rgba,"
-            f"colorchannelmixer=aa={opacity}"
-            f"[logo{overlay_idx}];"
+        # Alignment=2 anchors the bottom edge of the text block at the margin,
+        # but the preview editor positions its draggable label by its center.
+        # Subtract half a line (the font's rendered em size) so the rendered
+        # text lands centered on the configured position.
+        rendered_text_height = font_size * height / ASS_PLAYRES_HEIGHT
+        desired_margin_px = max(
+            round(height * (1.0 - position_y) - rendered_text_height / 2),
+            1,
         )
-        filters.append(overlay_filter)
 
-        # Overlay onto video
-        filters.append(
-            f"[v{overlay_idx}][logo{overlay_idx}]overlay={x_px}:{y_px}[v{overlay_idx + 1}]"
+        margin_v = max(
+            round(desired_margin_px * ASS_PLAYRES_HEIGHT / height),
+            1,
         )
-        overlay_idx += 1
 
-    return filters
+        # Keep the filename inside quotes. This is required for Windows drive
+        # letters and paths containing spaces; only the filter-level colon is escaped.
+        srt_escaped = _escape_ffmpeg_filter_path(srt_path)
+        force_style = ",".join([
+            "FontName=Arial",
+            f"FontSize={font_size}",
+            f"PrimaryColour=&H00{font_color}",
+            f"OutlineColour=&H00{outline_color}",
+            f"Outline={outline_width}",
+            "Alignment=2",
+            f"MarginV={margin_v}",
+        ])
+        subtitle_filter = (
+            f"subtitles=filename='{srt_escaped}':"
+            f"original_size={width}x{height}:force_style='{force_style}'"
+        )
+
+        if blur_existing:
+            # Only blur when the user confirms the source contains burned-in text.
+            # Crop the full-width lower band, blur that crop, put it back over the
+            # original frame, and render the new subtitle last so it stays sharp.
+            filter_complex = (
+                f"[0:v]split=2[v_main][v_blur];"
+                f"[v_blur]crop=w={blur_width}:h={blur_height}:x={blur_x}:y={blur_y},"
+                f"gblur=sigma={blur_strength}:steps={blur_steps}[blurred];"
+                f"[v_main][blurred]overlay=x={blur_x}:y={blur_y}:eof_action=repeat[blurred_video];"
+                f"[blurred_video]{subtitle_filter}[v_subtitle]"
+            )
+        else:
+            # Avoid a full-frame blur pass for videos without old captions.
+            filter_complex = f"[0:v]{subtitle_filter}[v_subtitle]"
+
+        cmd = [
+            "ffmpeg", "-i", input_video,
+            "-filter_complex", filter_complex,
+            "-map", "[v_subtitle]", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", os.getenv("FFMPEG_PRESET", "veryfast"), "-crf", "23",
+            "-c:a", "copy", "-shortest",
+            "-y", output_video,
+        ]
+
+        logger.info(
+            f"Burning subtitles (blur_old={blur_existing}, font_size={font_size}, "
+            f"blur_x={blur_x}, blur_y={blur_y}, blur_width={blur_width}, blur_height={blur_height}, "
+            f"blur_sigma={blur_strength}, "
+            f"blur_steps={blur_steps}, margin_v={margin_v}): {' '.join(cmd)}"
+        )
+        subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=600, **hidden_subprocess_kwargs())
+        logger.info(f"Subtitle burn successful: {output_video}")
+        return True
+    except (ValueError, TypeError) as exc:
+        logger.error(f"Invalid subtitle configuration: {exc}")
+        return False
+    except subprocess.TimeoutExpired as exc:
+        logger.error("Subtitle burn timed out after 600s")
+        if exc.stderr:
+            logger.error(f"ffmpeg stderr:\n{exc.stderr}")
+        return False
+    except subprocess.CalledProcessError as exc:
+        logger.error(f"Subtitle burn failed with return code {exc.returncode}")
+        logger.error(f"ffmpeg stderr:\n{exc.stderr or '(empty)'}")
+        logger.error(f"Filter complex used: {filter_complex}")
+        if os.path.exists(output_video):
+            os.remove(output_video)
+        return False
+
+
+def _download_progress_reporter(job_id: str):
+    """Build a thread-safe callback that persists download progress.
+
+    yt-dlp and pytubefix fire their callbacks on executor threads while the
+    caller's AsyncSession belongs to the event loop, so each write marshals a
+    short-lived dedicated session back onto the loop with
+    ``run_coroutine_threadsafe`` — never touching the caller's session.
+    Updates are throttled and skipped while a previous write is still in
+    flight to avoid hammering SQLite.
+    """
+    loop = asyncio.get_running_loop()
+    state = {"last_time": 0.0, "in_flight": None}
+
+    def _report(percent: float) -> None:
+        try:
+            pending = state["in_flight"]
+            if pending is not None and not pending.done():
+                return
+            now = time.monotonic()
+            if now - state["last_time"] < 2.0:
+                return
+            state["last_time"] = now
+            clamped = max(1, min(int(percent), 99))
+
+            async def _write():
+                try:
+                    async with async_session() as session:
+                        await update_job(session, job_id, "downloading", clamped)
+                except Exception:
+                    logger.debug("Progress write failed for job %s", job_id, exc_info=True)
+
+            state["in_flight"] = asyncio.run_coroutine_threadsafe(_write(), loop)
+        except Exception:
+            logger.debug("Progress reporting failed for job %s", job_id, exc_info=True)
+
+    return _report
+
+
+async def run_preview_download(job_id: str, url: str, session: AsyncSession):
+    """Phase 1: Download video for preview. Store in output dir for persistence."""
+    job_dir = os.path.join(str(OUTPUT_DIR), job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    temp_dir = os.path.join(str(TEMP_DIR), job_id)
+    os.makedirs(temp_dir, exist_ok=True)
+
+    try:
+        await update_job(session, job_id, "downloading", 0)
+        video_info = await download_video(
+            url, temp_dir, progress_cb=_download_progress_reporter(job_id)
+        )
+        video_path = video_info["video_path"]
+        title = video_info.get("title", "Unknown")
+        thumbnail_path = video_info.get("thumbnail_path")
+
+        await update_job_field(session, job_id, "title", title)
+
+        # Copy video to output dir for persistence (so it survives temp cleanup)
+        import shutil
+        video_dest = os.path.join(job_dir, "preview.mp4")
+        shutil.copy2(video_path, video_dest)
+        await update_job_field(session, job_id, "video_path", video_dest)
+
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            thumb_dest = os.path.join(job_dir, "thumbnail.jpg")
+            shutil.copy2(thumbnail_path, thumb_dest)
+            await update_job_field(session, job_id, "thumbnail_path", thumb_dest)
+
+        await update_job(session, job_id, "preview_ready", 100)
+        logger.info(f"Preview ready for job {job_id}: {video_dest}")
+
+    except Exception as e:
+        await update_job(session, job_id, "error", 0)
+        await update_job_field(session, job_id, "error", str(e))
+        raise
+    finally:
+        import shutil
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 async def run_pipeline(job_id: str, url: str, source_lang: str,
                         target_lang: str, voice: str, whisper_model: str,
                         tts_speed: float, session: AsyncSession,
-                        subtitle_config: dict = None):
-    job_dir = os.path.join("output", job_id)
+                        subtitle_config: Optional[dict] = None,
+                        audio_config: Optional[dict] = None,
+                        translation_config: Optional[TranslationConfig] = None):
+    job_dir = os.path.join(str(OUTPUT_DIR), job_id)
     os.makedirs(job_dir, exist_ok=True)
-    temp_dir = os.path.join("temp", job_id)
+    temp_dir = os.path.join(str(TEMP_DIR), job_id)
     os.makedirs(temp_dir, exist_ok=True)
 
-    # Convert Pydantic model to dict if needed
-    if subtitle_config is not None and hasattr(subtitle_config, 'model_dump'):
-        subtitle_config = subtitle_config.model_dump()
-
-    # Default subtitle config
-    if subtitle_config is None:
-        subtitle_config = {}
-
-    # Enable subtitles by default if translated SRT exists
-    subtitle_config.setdefault('enabled', True)
-    subtitle_config.setdefault('srt_path', os.path.join(job_dir, "translated.srt"))
-
-    # Get aspect ratio for overlay positioning
-    aspect_ratio = subtitle_config.get('aspect_ratio', '16:9')
-    video_width, video_height = get_video_dimensions(aspect_ratio)
+    # Audio mix volume defaults (overridable via audio_config)
+    dubbing_volume = audio_config.get("dubbing_volume", 2.0) if audio_config else 2.0
+    background_volume = audio_config.get("background_volume", 1.0) if audio_config else 1.0
+    original_vocals_volume = audio_config.get("original_vocals_volume", 0.1) if audio_config else 0.1
+    vocal_task = None
 
     try:
-        await update_job(session, job_id, "downloading", 0)
-        video_info = await download_video(url, temp_dir)
-        video_path = video_info["video_path"]
-        title = video_info.get("title", "Unknown")
-        thumbnail_path = video_info.get("thumbnail_path")
-        await update_job_field(session, job_id, "title", title)
-        if thumbnail_path and os.path.exists(thumbnail_path):
-            # Copy thumbnail to job output dir for persistence
-            import shutil
-            thumb_dest = os.path.join(job_dir, "thumbnail.jpg")
-            shutil.copy2(thumbnail_path, thumb_dest)
-            await update_job_field(session, job_id, "thumbnail_path", thumb_dest)
-        await update_job(session, job_id, "downloading", 100)
+        # Check if video was already downloaded in preview phase
+        existing_video = None
+        try:
+            from sqlalchemy import select as sa_select
+            from app.models.database import DubbingJob as _DJ
+            result_q = await session.execute(sa_select(_DJ).where(_DJ.id == job_id))
+            existing_job = result_q.scalar_one_or_none()
+            if existing_job and existing_job.video_path and os.path.exists(existing_job.video_path):
+                existing_video = existing_job.video_path
+                title = existing_job.title or "Unknown"
+                logger.info(f"Reusing preview video: {existing_video}")
+        except Exception:
+            pass
+
+        if existing_video:
+            video_path = existing_video
+            video_info = {"duration": 0}
+            await update_job(session, job_id, "downloading", 100)
+        else:
+            await update_job(session, job_id, "downloading", 0)
+            video_info = await download_video(
+                url, temp_dir, progress_cb=_download_progress_reporter(job_id)
+            )
+            video_path = video_info["video_path"]
+            title = video_info.get("title", "Unknown")
+            thumbnail_path = video_info.get("thumbnail_path")
+            await update_job_field(session, job_id, "title", title)
+            if thumbnail_path and os.path.exists(thumbnail_path):
+                import shutil
+                thumb_dest = os.path.join(job_dir, "thumbnail.jpg")
+                shutil.copy2(thumbnail_path, thumb_dest)
+                await update_job_field(session, job_id, "thumbnail_path", thumb_dest)
+            await update_job(session, job_id, "downloading", 100)
+
+        # Keep FastAPI's event loop responsive while probing media metadata.
+        video_width, video_height = await asyncio.to_thread(
+            get_actual_video_dimensions, video_path
+        )
+        logger.info(f"Video dimensions: {video_width}x{video_height}")
 
         await update_job(session, job_id, "transcribing", 0)
         audio_path = os.path.join(temp_dir, "audio.wav")
-        extract_audio(video_path, audio_path)
+        await asyncio.to_thread(extract_audio, video_path, audio_path)
         await update_job(session, job_id, "transcribing", 50)
 
-        result = transcribe_with_whisper(audio_path, whisper_model, source_lang)
+        result = await asyncio.to_thread(
+            transcribe_with_whisper, audio_path, whisper_model, source_lang
+        )
         original_srt = os.path.join(job_dir, "original.srt")
         segments_to_srt(result["segments"], original_srt)
         await update_job(session, job_id, "transcribing", 100)
 
         await update_job(session, job_id, "translating", 0)
         translated_srt = os.path.join(job_dir, "translated.srt")
-        translate_srt_deep_translator(original_srt, target_lang, translated_srt)
+        if translation_config is None:
+            translation_config = await load_translation_config(session)
+        await asyncio.to_thread(
+            translate_srt_deep_translator,
+            original_srt,
+            target_lang,
+            translated_srt,
+            source_lang=source_lang,
+            translation_config=translation_config,
+        )
         await update_job(session, job_id, "translating", 100)
+
+        # TTS is network-bound while vocal separation is a separate CPU-bound
+        # process, so start both jobs together instead of waiting sequentially.
+        vocal_task = asyncio.create_task(
+            asyncio.to_thread(separate_vocals, video_path, job_dir)
+        )
 
         await update_job(session, job_id, "tts", 0)
         translated_segments = srt_to_segments(translated_srt)
+        logger.info("Using translated SRT as TTS input: %s", translated_srt)
+        expected_audio_count = sum(1 for segment in translated_segments if segment.get("text", "").strip())
+        if expected_audio_count == 0:
+            raise RuntimeError("Không có nội dung phụ đề đã dịch để tạo audio lồng tiếng")
         tts_dir = os.path.join(job_dir, "tts")
         rate = speed_to_rate(tts_speed)
         audio_files = await generate_dubbing_audio(
             translated_segments, voice, tts_dir, rate
         )
+        if len(audio_files) != expected_audio_count:
+            raise RuntimeError(
+                f"Chỉ tạo được {len(audio_files)}/{expected_audio_count} đoạn audio từ phụ đề đã dịch; vui lòng kiểm tra kết nối TTS rồi thử lại."
+            )
         await update_job(session, job_id, "tts", 50)
 
         total_duration = video_info.get("duration", 0)
         if total_duration == 0:
-            total_duration = get_video_duration(video_path)
+            total_duration = await asyncio.to_thread(get_video_duration, video_path)
 
         dubbed_audio = os.path.join(job_dir, "dubbed_audio.wav")
-        merge_tts_segments(audio_files, total_duration, dubbed_audio)
+        await asyncio.to_thread(merge_tts_segments, audio_files, total_duration, dubbed_audio)
+        if not os.path.isfile(dubbed_audio):
+            raise RuntimeError("Không tạo được audio lồng tiếng cuối cùng")
         await update_job(session, job_id, "tts", 100)
 
-        await update_job(session, job_id, "removing_vocals", 0)
-        vocal_result = separate_vocals(video_path, job_dir)
+        await update_job(session, job_id, "removing_vocals", 50)
+        vocal_result = await vocal_task
         no_vocals = vocal_result.get("no_vocals")
+        original_vocals = vocal_result.get("vocals")
         await update_job(session, job_id, "removing_vocals", 100)
 
         await update_job(session, job_id, "merging", 0)
         final_output = os.path.join(job_dir, f"{job_id}_dubbed.mp4")
 
-        # Build filter complex for audio mixing
+        # Normalize each source first, then apply the configured gain. Applying
+        # gain after loudnorm keeps values such as 1.4 and 0.2 meaningful.
         if no_vocals and os.path.exists(no_vocals):
-            # Normalize and boost dubbed audio volume before mixing
             boosted_dubbed = os.path.join(job_dir, "dubbed_audio_boosted.wav")
-            subprocess.run([
-                "ffmpeg", "-i", dubbed_audio,
-                "-af", "volume=4.0,loudnorm=I=-16:TP=-1.5:LRA=11",
-                "-ar", "44100", "-y", boosted_dubbed
-            ], capture_output=True, check=True)
+            await asyncio.to_thread(
+                _normalize_audio_track, dubbed_audio, boosted_dubbed, dubbing_volume
+            )
 
-            # Also normalize the background (no_vocals) to consistent level
             normalized_bg = os.path.join(job_dir, "no_vocals_normalized.wav")
-            subprocess.run([
-                "ffmpeg", "-i", no_vocals,
-                "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
-                "-ar", "44100", "-y", normalized_bg
-            ], capture_output=True, check=True)
+            await asyncio.to_thread(
+                _normalize_audio_track, no_vocals, normalized_bg, background_volume
+            )
 
-            # Mix: background at normal level, dubbed at boosted level
+            audio_tracks = [normalized_bg, boosted_dubbed]
+            if original_vocals and os.path.exists(original_vocals) and original_vocals_volume > 0:
+                normalized_vocals = os.path.join(job_dir, "vocals_normalized.wav")
+                await asyncio.to_thread(
+                    _normalize_audio_track,
+                    original_vocals,
+                    normalized_vocals,
+                    original_vocals_volume,
+                )
+                audio_tracks.append(normalized_vocals)
+
+            logger.info(
+                f"Audio volumes - dubbing: {dubbing_volume}, "
+                f"background: {background_volume}, original vocals: {original_vocals_volume}"
+            )
             merged_audio = os.path.join(job_dir, "final_audio.wav")
-            subprocess.run([
-                "ffmpeg", "-i", normalized_bg, "-i", boosted_dubbed,
-                "-filter_complex",
-                "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0,volume=1.2[out]",
-                "-map", "[out]", "-ar", "44100", "-y", merged_audio
-            ], capture_output=True, check=True)
+            await asyncio.to_thread(_mix_audio_tracks, audio_tracks, merged_audio)
 
-            # Build complete filter graph with subtitles + overlays
-            filter_parts = []
-            video_input_idx = 0
-            audio_input_idx = 1
+            # Subtitle/overlay rendering has been removed from the pipeline.
+            # The dubbed video now contains only the mixed audio + original video.
+            current_video_path = video_path
 
-            # Start with video
-            current_video = f"{video_input_idx}:v"
-
-            # Add subtitles if enabled
-            if subtitle_config.get('enabled') and os.path.exists(subtitle_config['srt_path']):
-                subtitle_filter = build_subtitle_filter(subtitle_config)
-                if subtitle_filter:
-                    filter_parts.append(f"[{current_video}]{subtitle_filter}[v_subs]")
-                    current_video = "[v_subs]"
-
-            # Add text/image overlays
-            overlay_filters = build_overlay_filters(subtitle_config, video_width, video_height)
-            for i, of in enumerate(overlay_filters):
-                if i == 0:
-                    filter_parts.append(f"[{current_video}]{of}")
+            # PASS 2.5: Burn subtitles with blur mask (if enabled)
+            if subtitle_config and subtitle_config.get("enabled", False):
+                translated_srt = os.path.join(job_dir, "translated.srt")
+                if os.path.exists(translated_srt):
+                    subtitle_output = os.path.join(job_dir, "video_with_subs.mp4")
+                    success = await asyncio.to_thread(
+                        burn_subtitles_with_blur_mask,
+                        input_video=current_video_path,
+                        srt_path=translated_srt,
+                        output_video=subtitle_output,
+                        video_width=video_width,
+                        video_height=video_height,
+                        subtitle_config=subtitle_config,
+                    )
+                    if success:
+                        current_video_path = subtitle_output
+                        logger.info("Subtitle burn with blur mask completed")
+                    else:
+                        logger.warning("Subtitle burn failed, continuing without subtitles")
                 else:
-                    filter_parts.append(of)
-                # Update current_video to the last output
-                if 'overlay' in of or 'drawtext' in of:
-                    # Extract output label
-                    parts = of.split(']')
-                    if len(parts) > 1:
-                        current_video = parts[-1].strip() + ']'
+                    logger.warning(f"Translated SRT not found: {translated_srt}")
 
-            # If we have video filters, combine with audio
-            if filter_parts:
-                # Build the full filter complex
-                filter_complex = ";".join(filter_parts)
-
-                # Get final video label
-                final_video_label = current_video
-                if not final_video_label.startswith('['):
-                    final_video_label = "[v_final]"
-
+            # PASS 3: Merge video + audio
+            try:
                 cmd = [
-                    "ffmpeg", "-i", video_path, "-i", merged_audio,
-                    "-filter_complex", filter_complex,
-                    "-map", final_video_label, "-map", f"{audio_input_idx}:a",
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "ffmpeg", "-i", current_video_path, "-i", merged_audio,
+                    "-c:v", "copy", "-c:a", "aac",
+                    "-map", "0:v", "-map", "1:a",
                     "-shortest", "-y", final_output
                 ]
-            else:
-                # No video filters, just combine
-                subprocess.run([
-                    "ffmpeg", "-i", video_path, "-i", merged_audio,
-                    "-c:v", "copy", "-map", "0:v:0", "-map", "1:a:0",
-                    "-shortest", "-y", final_output
-                ], capture_output=True, check=True)
+                logger.info(f"Pass 3 - Final merge: {' '.join(cmd)}")
+                await asyncio.to_thread(
+                    subprocess.run,
+                    cmd,
+                    capture_output=True,
+                    check=True,
+                    timeout=300,
+                    **hidden_subprocess_kwargs(),
+                )
+                logger.info("Pass 3 - Final merge successful")
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+                logger.error(f"Pass 3 - Final merge failed: {e}")
+                raise RuntimeError("Không thể ghép audio lồng tiếng vào video") from e
         else:
-            # No vocals removed - just boost and normalize the dubbed audio
+            # Demucs may fail on a source; keep the original track as a separate
+            # source and apply the requested gain after normalization as above.
+            logger.info(
+                f"Audio volumes (no vocals removed) - dubbing: {dubbing_volume}, "
+                f"background: {background_volume}, original vocals: {original_vocals_volume}"
+            )
             boosted_dubbed = os.path.join(job_dir, "dubbed_audio_boosted.wav")
-            subprocess.run([
-                "ffmpeg", "-i", dubbed_audio,
-                "-af", "volume=4.0,loudnorm=I=-16:TP=-1.5:LRA=11",
-                "-ar", "44100", "-y", boosted_dubbed
-            ], capture_output=True, check=True)
+            await asyncio.to_thread(
+                _normalize_audio_track, dubbed_audio, boosted_dubbed, dubbing_volume
+            )
 
-            # Build filter graph for subtitles + overlays
-            filter_parts = []
-            current_video = "0:v"
+            original_audio = os.path.join(job_dir, "original_audio.wav")
+            await asyncio.to_thread(
+                subprocess.run,
+                [
+                    "ffmpeg", "-i", video_path,
+                    "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+                    "-y", original_audio,
+                ],
+                capture_output=True,
+                check=True,
+                **hidden_subprocess_kwargs(),
+            )
 
-            # Add subtitles if enabled
-            if subtitle_config.get('enabled') and os.path.exists(subtitle_config['srt_path']):
-                subtitle_filter = build_subtitle_filter(subtitle_config)
-                if subtitle_filter:
-                    filter_parts.append(f"[{current_video}]{subtitle_filter}[v_subs]")
-                    current_video = "[v_subs]"
+            normalized_original = os.path.join(job_dir, "original_audio_normalized.wav")
+            await asyncio.to_thread(
+                _normalize_audio_track,
+                original_audio,
+                normalized_original,
+                original_vocals_volume,
+            )
 
-            # Add text/image overlays
-            overlay_filters = build_overlay_filters(subtitle_config, video_width, video_height)
-            for i, of in enumerate(overlay_filters):
-                if i == 0:
-                    filter_parts.append(f"[{current_video}]{of}")
+            merged_audio = os.path.join(job_dir, "final_audio.wav")
+            await asyncio.to_thread(
+                _mix_audio_tracks, [normalized_original, boosted_dubbed], merged_audio
+            )
+
+            # Subtitle/overlay rendering has been removed from the pipeline.
+            current_video_path = video_path
+
+            # PASS 2.5: Burn subtitles with blur mask (if enabled)
+            if subtitle_config and subtitle_config.get("enabled", False):
+                translated_srt = os.path.join(job_dir, "translated.srt")
+                if os.path.exists(translated_srt):
+                    subtitle_output = os.path.join(job_dir, "video_with_subs.mp4")
+                    success = await asyncio.to_thread(
+                        burn_subtitles_with_blur_mask,
+                        input_video=current_video_path,
+                        srt_path=translated_srt,
+                        output_video=subtitle_output,
+                        video_width=video_width,
+                        video_height=video_height,
+                        subtitle_config=subtitle_config,
+                    )
+                    if success:
+                        current_video_path = subtitle_output
+                        logger.info("Subtitle burn with blur mask completed")
+                    else:
+                        logger.warning("Subtitle burn failed, continuing without subtitles")
                 else:
-                    filter_parts.append(of)
-                if 'overlay' in of or 'drawtext' in of:
-                    parts = of.split(']')
-                    if len(parts) > 1:
-                        current_video = parts[-1].strip() + ']'
+                    logger.warning(f"Translated SRT not found: {translated_srt}")
 
-            if filter_parts:
-                filter_complex = ";".join(filter_parts)
-                final_video_label = current_video
-                if not final_video_label.startswith('['):
-                    final_video_label = "[v_final]"
+            # PASS 3: Merge video + audio
+            try:
+                cmd = [
+                    "ffmpeg", "-i", current_video_path, "-i", merged_audio,
+                    "-c:v", "copy", "-c:a", "aac",
+                    "-map", "0:v", "-map", "1:a",
+                    "-shortest", "-y", final_output
+                ]
+                logger.info(f"[No-vocals] Pass 3 - Final merge: {' '.join(cmd)}")
+                await asyncio.to_thread(
+                    subprocess.run,
+                    cmd,
+                    capture_output=True,
+                    check=True,
+                    timeout=300,
+                    **hidden_subprocess_kwargs(),
+                )
+                logger.info("[No-vocals] Pass 3 - Final merge successful")
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+                logger.error(f"[No-vocals] Pass 3 - Final merge failed: {e}")
+                raise RuntimeError("Không thể ghép audio lồng tiếng vào video") from e
 
-                subprocess.run([
-                    "ffmpeg", "-i", video_path, "-i", boosted_dubbed,
-                    "-filter_complex", filter_complex,
-                    "-map", final_video_label, "-map", "1:a",
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                    "-shortest", "-y", final_output
-                ], capture_output=True, check=True)
-            else:
-                subprocess.run([
-                    "ffmpeg", "-i", video_path, "-i", boosted_dubbed,
-                    "-c:v", "copy", "-map", "0:v:0", "-map", "1:a:0",
-                    "-shortest", "-y", final_output
-                ], capture_output=True, check=True)
+        if not os.path.isfile(final_output) or os.path.getsize(final_output) <= 0:
+            raise RuntimeError("Video đầu ra không được tạo thành công")
 
         await update_job(session, job_id, "merging", 100)
 
         file_size = os.path.getsize(final_output) if os.path.exists(final_output) else 0
         size_str = f"{file_size / (1024*1024):.1f} MB"
 
+        # Segment MP3 files are disposable once the merged audio and final
+        # video exist. Keep translated.srt and merged artifacts for retry/debug.
+        await asyncio.to_thread(cleanup_tts_directory, tts_dir)
         await update_job_field(session, job_id, "result_path", final_output)
         await update_job_field(session, job_id, "file_size", size_str)
         await update_job(session, job_id, "completed", 100)
 
     except asyncio.CancelledError:
+        if vocal_task is not None and not vocal_task.done():
+            vocal_task.cancel()
         await update_job(session, job_id, "cancelled", 0)
         raise
     except Exception as e:
+        if vocal_task is not None and not vocal_task.done():
+            vocal_task.cancel()
+            try:
+                await vocal_task
+            except asyncio.CancelledError:
+                pass
         await update_job(session, job_id, "error", 0)
         await update_job_field(session, job_id, "error", str(e))
         raise

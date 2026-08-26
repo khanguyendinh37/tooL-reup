@@ -3,6 +3,9 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install system dependencies including fonts for subtitles and edge-tts support
+# fonts-liberation: Vietnamese + Latin + Greek + Cyrillic (Arial/Verdana/Times/Courier metric-compatible)
+# fonts-noto-cjk: Chinese/Japanese/Korean
+# fonts-noto: comprehensive Unicode coverage for all scripts
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     git \
@@ -13,6 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fontconfig \
     fonts-dejavu-core \
     fonts-noto-cjk \
+    fonts-liberation \
+    fonts-noto \
+    fonts-freefont-ttf \
     && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
 

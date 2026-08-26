@@ -22,11 +22,13 @@ faster-whisper==1.0.3
 # Brotli for Douyin API decompression
 brotli>=1.1.0
 
-# Translation (free)
-deep-translator==1.11.4
+# Translation - Google fallback plus optional provider APIs via urllib
+# urllib is part of Python standard library; no provider SDK/API dependency is required.
 
 # TTS (Edge TTS - supports voice selection like Nam Minh, Hoài My, etc.)
 edge-tts>=6.1.9
+# Network fallback when Edge TTS is unavailable or rate-limited.
+gTTS>=2.5.4
 
 # Vocal removal
 demucs>=4.0.1

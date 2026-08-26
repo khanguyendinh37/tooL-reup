@@ -4,7 +4,9 @@ from app.core.downloader import (
     save_cookies, get_cookies_status, get_all_cookies_status,
     delete_cookies, SUPPORTED_PLATFORMS, validate_cookies_content
 )
+import logging
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -15,15 +17,22 @@ class CookiesRequest(BaseModel):
 
 @router.post("/upload")
 async def upload_cookies(req: CookiesRequest):
+    logger.info(f"Upload cookies request: platform={req.platform}, cookies_length={len(req.cookies)}")
+    
     if req.platform not in SUPPORTED_PLATFORMS:
+        logger.error(f"Unsupported platform: {req.platform}")
         raise HTTPException(status_code=400, detail=f"Nền tảng không hỗ trợ: {req.platform}")
 
     # Validate cookies content before saving
     is_valid, message = validate_cookies_content(req.cookies, req.platform)
+    logger.info(f"Validation result: is_valid={is_valid}, message={message}")
+    
     if not is_valid:
         raise HTTPException(status_code=400, detail=message)
 
     success = save_cookies(req.platform, req.cookies)
+    logger.info(f"Save result: success={success}")
+    
     if not success:
         raise HTTPException(status_code=500, detail="Không thể lưu cookies")
     return {"status": "ok", "message": f"Đã lưu cookies cho {SUPPORTED_PLATFORMS[req.platform]['name']}: {message}"}

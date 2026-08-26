@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title>VideoDub</title>
+  <defs>
+    <linearGradient id="brand-gradient" x1="12" y1="8" x2="116" y2="120" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5c7cfa"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="30" fill="url(#brand-gradient)"/>
+  <g fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="7">
+    <path d="m64 22-7.65 23.25a8 8 0 0 1-5.1 5.1L28 58l23.25 7.65a8 8 0 0 1 5.1 5.1L64 94l7.65-23.25a8 8 0 0 1 5.1-5.1L100 58l-23.25-7.65a8 8 0 0 1-5.1-5.1L64 22Z"/>
+    <path d="M28 20v16M100 92v16M20 28h16M92 100h16"/>
+  </g>
+</svg>

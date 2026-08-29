@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Search, Grid3X3, List, Trash2, Download, Play, Clock, MoreVertical, Loader2, AlertCircle, Pause, RotateCcw } from 'lucide-react'
-import { downloadFile, getHistory, deleteHistoryItem, retryDubbing } from '@/lib/api'
+import { Search, Grid3X3, List, Trash2, Download, Play, Clock, MoreVertical, Loader2, AlertCircle, Pause, RotateCcw, CheckSquare } from 'lucide-react'
+import { downloadFile, getHistory, deleteHistoryItem, deleteHistoryItems, retryDubbing } from '@/lib/api'
 import { formatDate } from '@/lib/utils'
 import { workflowFromJob } from '@/lib/workflow'
 import { useAppStore } from '@/stores/appStore'
@@ -31,6 +31,8 @@ export default function History() {
   const [searchQuery, setSearchQuery] = useState('')
   const [filterStatus, setFilterStatus] = useState<string>('all')
   const [openMenu, setOpenMenu] = useState<string | null>(null)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [bulkDeleting, setBulkDeleting] = useState(false)
 
   // Inline video player state
   const [playingId, setPlayingId] = useState<string | null>(null)
@@ -75,6 +77,59 @@ export default function History() {
       alert('Không thể xóa video')
     }
   }
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const toggleSelectAll = () => {
+    const visibleIds = filteredData.map(item => item.id)
+    if (visibleIds.every(id => selectedIds.has(id))) {
+      // Deselect all visible
+      setSelectedIds(prev => {
+        const next = new Set(prev)
+        visibleIds.forEach(id => next.delete(id))
+        return next
+      })
+    } else {
+      // Select all visible
+      setSelectedIds(prev => {
+        const next = new Set(prev)
+        visibleIds.forEach(id => next.add(id))
+        return next
+      })
+    }
+  }
+
+  const handleBulkDelete = async () => {
+    const count = selectedIds.size
+    if (count === 0) return
+    if (!confirm(`Bạn có chắc muốn xóa ${count} video đã chọn? Hành động này không thể hoàn tác.`)) return
+
+    setBulkDeleting(true)
+    try {
+      const ids = Array.from(selectedIds)
+      const result = await deleteHistoryItems(ids)
+      // Remove deleted items from local state
+      setItems(prev => prev.filter(item => !selectedIds.has(item.id)))
+      // Stop playing if a deleted video was playing
+      if (playingId && selectedIds.has(playingId)) setPlayingId(null)
+      setSelectedIds(new Set())
+      const deletedCount = result?.deleted_count ?? count
+      alert(`Đã xóa ${deletedCount} video khỏi lịch sử.`)
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Không thể xóa các video đã chọn')
+    } finally {
+      setBulkDeleting(false)
+    }
+  }
+
+  const exitSelectionMode = () => setSelectedIds(new Set())
 
   const handleDownload = async (item: HistoryItem) => {
     if (item.status !== 'completed') return
@@ -216,6 +271,13 @@ export default function History() {
         <h2 className="text-2xl font-bold text-surface-100">Lịch sử lồng tiếng</h2>
         <div className="flex items-center gap-2">
           <button
+            onClick={toggleSelectAll}
+            className="p-2 rounded-lg transition-colors text-surface-500 hover:bg-surface-800"
+            title="Chọn tất cả"
+          >
+            <CheckSquare className="w-5 h-5" />
+          </button>
+          <button
             onClick={() => setViewMode('grid')}
             className={`p-2 rounded-lg transition-colors ${viewMode === 'grid' ? 'bg-primary-600/20 text-primary-400' : 'text-surface-500 hover:bg-surface-800'}`}
           >
@@ -253,6 +315,32 @@ export default function History() {
         </select>
       </div>
 
+      {/* Bulk Actions Bar */}
+      {selectedIds.size > 0 && (
+        <div className="glass-card !p-3 !pb-2 flex items-center justify-between mb-4 animate-fade-in">
+          <div className="flex items-center gap-2 text-sm text-surface-300">
+            <span>Đã chọn {selectedIds.size} video</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={exitSelectionMode}
+              className="btn-ghost text-sm"
+              disabled={bulkDeleting}
+            >
+              Bỏ chọn
+            </button>
+            <button
+              onClick={handleBulkDelete}
+              disabled={bulkDeleting}
+              className="btn-ghost text-sm text-red-400 hover:text-red-300 hover:bg-red-500/10 border border-red-500/30 disabled:cursor-wait disabled:opacity-60"
+            >
+              <Trash2 className="w-4 h-4 mr-1" />
+              {bulkDeleting ? 'Đang xóa...' : 'Xóa đã chọn'}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Grid View */}
       {viewMode === 'grid' ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -260,6 +348,14 @@ export default function History() {
             <div key={item.id} className="glass-card hover:scale-[1.02] transition-all duration-300">
               {/* Thumbnail / Video Player */}
               <div className="aspect-video bg-surface-800 rounded-xl mb-4 flex items-center justify-center relative overflow-hidden group">
+                <div className="flex items-center justify-center gap-1.5 absolute top-2 left-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(item.id)}
+                    onChange={() => toggleSelect(item.id)}
+                    className="w-3 h-3 rounded border border-surface-400 cursor-pointer"
+                  />
+                </div>
                 {playingId === item.id ? (
                   /* Inline video player */
                   <div className="absolute inset-0 bg-black">
@@ -387,6 +483,12 @@ export default function History() {
         <div className="space-y-2">
           {filteredData.map((item) => (
             <div key={item.id} className="glass-card !p-4 flex items-center gap-4 hover:bg-surface-800/30 transition-colors">
+              <input
+                type="checkbox"
+                checked={selectedIds.has(item.id)}
+                onChange={() => toggleSelect(item.id)}
+                className="w-4 h-4 rounded border border-surface-500 cursor-pointer flex-shrink-0"
+              />
               <div
                 className="w-24 h-14 bg-surface-800 rounded-lg flex items-center justify-center flex-shrink-0 relative overflow-hidden cursor-pointer"
                 onClick={() => handlePlayToggle(item)}

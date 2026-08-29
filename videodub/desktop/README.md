@@ -1,8 +1,12 @@
-# VideoDub Desktop (Windows)
+# VideoDub Desktop
+
+**Platform support:** [Windows](#windows-build) | [macOS](README_desktop_macos.md)
 
 Bản desktop dùng `pywebview` để mở giao diện React production trong cửa sổ native. FastAPI chạy trên loopback port ngẫu nhiên và tự phục vụ frontend, vì vậy không cần mở hai terminal hoặc chạy Docker.
 
-## Yêu cầu build
+## Windows Build
+
+### Yêu cầu
 
 - Windows 10/11
 - Python 3.11+

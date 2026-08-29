@@ -6,7 +6,7 @@ import {
   Save, AlertCircle, RefreshCw
 } from 'lucide-react'
 import { LANGUAGES, TTS_VOICES, WHISPER_MODELS } from '@/lib/utils'
-import { downloadFile, startPreview, startDubbing, getDubbingStatus, getSettings, updateSettings } from '@/lib/api'
+import { downloadFile, startPreview, startDubbing, getDubbingStatus, getSettings, updateSettings, cancelDubbing } from '@/lib/api'
 import {
   DEFAULT_BLUR_REGION,
   DEFAULT_WORKFLOW_FORM,
@@ -168,6 +168,7 @@ export default function Dubbing() {
   const [backgroundVolume, setBackgroundVolume] = useState(() => activeWorkflow?.backgroundVolume ?? dubbingPreferences.backgroundVolume ?? DEFAULT_WORKFLOW_FORM.backgroundVolume)
   const [originalVocalsVolume, setOriginalVocalsVolume] = useState(() => activeWorkflow?.originalVocalsVolume ?? dubbingPreferences.originalVocalsVolume ?? DEFAULT_WORKFLOW_FORM.originalVocalsVolume)
   const [settingsSaved, setSettingsSaved] = useState(false)
+  const [cancelPending, setCancelPending] = useState(false)
 
   const applyWorkflowToForm = (workflow: ActiveWorkflow) => {
     setUrl(workflow.url)
@@ -527,6 +528,35 @@ export default function Dubbing() {
     setUrl('')
   }
 
+  // Start a new download without canceling the current one (allows parallel downloads)
+  const handleStartNewDownload = () => {
+    setLocalError(null)
+    setUrl('')
+    // Reset workflow phase to idle so a new download can be started
+    // without needing to fully reset the workflow
+    patchActiveWorkflow({
+      phase: 'idle',
+      status: 'pending',
+      progress: 0,
+      error: null,
+      updatedAt: new Date().toISOString(),
+    })
+  }
+
+  const handleCancel = async () => {
+    if (!jobId) return
+    setCancelPending(true)
+    try {
+      await cancelDubbing(jobId)
+      setLocalError('Đã hủy quy trình lồng tiếng')
+      patchActiveWorkflow({ phase: 'error', status: 'cancelled', error: 'Đã hủy quy trình lồng tiếng', updatedAt: new Date().toISOString() })
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : 'Không thể hủy quy trình')
+    } finally {
+      setCancelPending(false)
+    }
+  }
+
   const handleSubtitlePositionChange = (position: string) => {
     setSubtitlePosition(position)
     setSubtitlePositionY(subtitleYForPreset(position))
@@ -567,9 +597,31 @@ export default function Dubbing() {
               <><Download className="w-5 h-5" /> Tải video</>
             </button>
           ) : workflowPhase === 'downloading' ? (
-            <button disabled className="btn-primary inline-flex items-center gap-2 opacity-50">
-              <Loader2 className="w-5 h-5 animate-spin" /> Đang tải...
-            </button>
+            <>
+              <button disabled className="btn-primary inline-flex items-center gap-2 opacity-50">
+                <Loader2 className="w-5 h-5 animate-spin" /> Đang tải...
+              </button>
+              <button
+                onClick={handleStartNewDownload}
+                className="btn-secondary inline-flex items-center gap-2"
+                title="Tải video khác trong khi đang tải"
+              >
+                <Download className="w-5 h-5" /> Tải video khác
+              </button>
+            </>
+          ) : workflowPhase === 'processing' ? (
+            <>
+              <button disabled className="btn-primary inline-flex items-center gap-2 opacity-50">
+                <Loader2 className="w-5 h-5 animate-spin" /> Đang xử lý...
+              </button>
+              <button
+                onClick={handleStartNewDownload}
+                className="btn-secondary inline-flex items-center gap-2"
+                title="Tải video khác trong khi đang xử lý"
+              >
+                <Download className="w-5 h-5" /> Tải video khác
+              </button>
+            </>
           ) : workflowPhase === 'preview' ? (
             <button
               onClick={handleStartDubbing}
@@ -833,10 +885,18 @@ export default function Dubbing() {
             <div className="w-12 h-12 rounded-xl bg-primary-500/20 flex items-center justify-center">
               <Loader2 className="w-6 h-6 text-primary-400 animate-spin" />
             </div>
-            <div>
+            <div className="flex-1">
               <h3 className="text-lg font-semibold text-surface-100">Đang lồng tiếng...</h3>
               <p className="text-surface-400 text-sm">Quá trình có thể mất vài phút</p>
             </div>
+            <button
+              onClick={handleCancel}
+              disabled={cancelPending}
+              className="btn-secondary inline-flex items-center gap-2 text-red-300 hover:text-red-200 border-red-500/30 hover:border-red-400/50 disabled:opacity-50"
+            >
+              {cancelPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />}
+              {cancelPending ? 'Đang hủy...' : 'Hủy lồng tiếng'}
+            </button>
           </div>
           <div className="space-y-4">
             {steps.map((step) => {

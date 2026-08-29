@@ -1,0 +1,50 @@
+name: Build macOS Desktop
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # Needed to upload artifacts
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install FFmpeg (Homebrew)
+        run: brew install ffmpeg
+
+      - name: Build macOS Desktop
+        run: |
+          chmod +x videodub/desktop/build_macos.sh
+          ./videodub/desktop/build_macos.sh
+
+      - name: Prepare artifact
+        run: |
+          cd videodub/desktop/dist
+          zip -r ../VideoDub-macos.zip VideoDub.app
+
+      - name: Upload macOS app
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoDub-macos
+          path: videodub/desktop/dist/VideoDub-macos.zip
+          retention-days: 30

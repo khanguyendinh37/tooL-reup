@@ -27,6 +27,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.database import DubbingJob, async_session
 
 
+async def _check_cancelled(session: AsyncSession, job_id: str):
+    """Poll the database and raise CancelledError if the user cancelled the job."""
+    try:
+        result = await session.execute(
+            select(DubbingJob).where(DubbingJob.id == job_id)
+        )
+        job = result.scalar_one_or_none()
+        if job and job.status == "cancelled":
+            raise asyncio.CancelledError()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Never let a DB hiccup crash the pipeline
+        pass
+
+
 def hex_to_ass(color: str, default: str = "FFFFFF") -> str:
     """Convert a CSS hex color to the BGR hex format expected by libass."""
     if not isinstance(color, str):
@@ -445,6 +461,7 @@ async def run_preview_download(job_id: str, url: str, session: AsyncSession):
             await update_job_field(session, job_id, "thumbnail_path", thumb_dest)
 
         await update_job(session, job_id, "preview_ready", 100)
+        await _check_cancelled(session, job_id)
         logger.info(f"Preview ready for job {job_id}: {video_dest}")
 
     except Exception as e:
@@ -508,6 +525,7 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
                 shutil.copy2(thumbnail_path, thumb_dest)
                 await update_job_field(session, job_id, "thumbnail_path", thumb_dest)
             await update_job(session, job_id, "downloading", 100)
+        await _check_cancelled(session, job_id)
 
         # Keep FastAPI's event loop responsive while probing media metadata.
         video_width, video_height = await asyncio.to_thread(
@@ -519,6 +537,7 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
         audio_path = os.path.join(temp_dir, "audio.wav")
         await asyncio.to_thread(extract_audio, video_path, audio_path)
         await update_job(session, job_id, "transcribing", 50)
+        await _check_cancelled(session, job_id)
 
         result = await asyncio.to_thread(
             transcribe_with_whisper, audio_path, whisper_model, source_lang
@@ -526,6 +545,7 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
         original_srt = os.path.join(job_dir, "original.srt")
         segments_to_srt(result["segments"], original_srt)
         await update_job(session, job_id, "transcribing", 100)
+        await _check_cancelled(session, job_id)
 
         await update_job(session, job_id, "translating", 0)
         translated_srt = os.path.join(job_dir, "translated.srt")
@@ -540,6 +560,7 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
             translation_config=translation_config,
         )
         await update_job(session, job_id, "translating", 100)
+        await _check_cancelled(session, job_id)
 
         # TTS is network-bound while vocal separation is a separate CPU-bound
         # process, so start both jobs together instead of waiting sequentially.
@@ -563,6 +584,7 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
                 f"Chỉ tạo được {len(audio_files)}/{expected_audio_count} đoạn audio từ phụ đề đã dịch; vui lòng kiểm tra kết nối TTS rồi thử lại."
             )
         await update_job(session, job_id, "tts", 50)
+        await _check_cancelled(session, job_id)
 
         total_duration = video_info.get("duration", 0)
         if total_duration == 0:
@@ -573,12 +595,14 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
         if not os.path.isfile(dubbed_audio):
             raise RuntimeError("Không tạo được audio lồng tiếng cuối cùng")
         await update_job(session, job_id, "tts", 100)
+        await _check_cancelled(session, job_id)
 
         await update_job(session, job_id, "removing_vocals", 50)
         vocal_result = await vocal_task
         no_vocals = vocal_result.get("no_vocals")
         original_vocals = vocal_result.get("vocals")
         await update_job(session, job_id, "removing_vocals", 100)
+        await _check_cancelled(session, job_id)
 
         await update_job(session, job_id, "merging", 0)
         final_output = os.path.join(job_dir, f"{job_id}_dubbed.mp4")

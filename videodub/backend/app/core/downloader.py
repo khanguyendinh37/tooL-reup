@@ -11,13 +11,107 @@ from app.core.process_utils import hidden_subprocess_kwargs
 
 logger = logging.getLogger(__name__)
 
+# Platforms that need Chrome impersonation to bypass IP/bot-detection blocks.
+# Target format: "browser-version:os-version" (e.g., "chrome-120:windows-10")
+# Must match yt-dlp's _SUPPORTED_IMPERSONATE_TARGET_MAP keys.
+# We try multiple targets in order of preference and use the first available.
+# Common targets: chrome-120:windows-10, chrome-131:windows-10, edge-120:windows-10,
+# chrome-120:macos-14, chrome-131:macos-14, safari-17:macos-14
+_IMPERSONATE_TARGETS: dict[str, list[str]] = {
+    "tiktok": ["chrome-120:windows-10", "chrome-131:windows-10", "edge-120:windows-10",
+               "chrome-120:macos-14", "chrome-131:macos-14", "safari-17:macos-14"],
+    "facebook": ["chrome-120:windows-10", "chrome-131:windows-10", "edge-120:windows-10",
+                 "chrome-120:macos-14", "chrome-131:macos-14", "safari-17:macos-14"],
+    "twitter": ["chrome-120:windows-10", "chrome-131:windows-10", "edge-120:windows-10",
+                "chrome-120:macos-14", "chrome-131:macos-14", "safari-17:macos-14"],
+    "instagram": ["chrome-120:windows-10", "chrome-131:windows-10", "edge-120:windows-10",
+                  "chrome-120:macos-14", "chrome-131:macos-14", "safari-17:macos-14"],
+    "vimeo": ["chrome-120:windows-10", "chrome-131:windows-10", "edge-120:windows-10",
+              "chrome-120:macos-14", "chrome-131:macos-14", "safari-17:macos-14"],
+}
+
+
 COOKIES_DIR = str(DATA_COOKIES_DIR)
 os.makedirs(COOKIES_DIR, exist_ok=True)
+
+
+def _check_curl_cffi_compatibility():
+    """Check if curl_cffi is compatible with installed yt-dlp.
+
+    Returns True if compatible, False if incompatible or not installed.
+    """
+    try:
+        import curl_cffi
+        import yt_dlp
+
+        # Safely get versions
+        cc_version_str = getattr(curl_cffi, '__version__', '0.0.0')
+        yt_version_str = getattr(yt_dlp, '__version__', '0.0.0')
+
+        # Parse curl_cffi version safely
+        try:
+            version_parts = str(cc_version_str).split('.')
+            cc_version = tuple(int(x) for x in version_parts[:2] if x.isdigit())
+        except (ValueError, AttributeError):
+            cc_version = (0, 0)
+
+        # yt-dlp supports curl_cffi 0.5.10 and 0.10.x through 0.15.x
+        supported = (cc_version == (0, 5)) or ((0, 10) <= cc_version < (0, 16))
+        if not supported:
+            logger.warning(
+                f"curl_cffi {cc_version_str} may be incompatible with yt-dlp {yt_version_str}. "
+                f"Supported: 0.5.10, 0.10.x-0.15.x. "
+                f"Fix: pip install 'yt-dlp[default,curl_cffi]'"
+            )
+        return supported
+    except ImportError:
+        return False
+    except Exception:
+        # If we can't determine compatibility, return True to allow impersonation attempts
+        # to proceed (better to try and potentially fail than to disable it entirely)
+        return True
+
+
+def _build_impersonate_target(platform: str):
+    """Return the first available impersonate target string for yt-dlp, or None if unavailable.
+
+    Tries specific version targets first. Falls back gracefully when targets
+    are not compiled into the curl_cffi binary.
+    """
+    if platform not in _IMPERSONATE_TARGETS:
+        return None
+    target_list = _IMPERSONATE_TARGETS[platform]
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        supported_map = getattr(ImpersonateTarget, '_SUPPORTED_IMPERSONATE_TARGET_MAP', {})
+        if not supported_map:
+            # No supported targets available
+            logger.warning(
+                f"Impersonation targets not available. "
+                f"If curl_cffi is installed but incompatible with yt-dlp, "
+                f"try: pip install 'yt-dlp[default,curl_cffi]'"
+            )
+            return None
+        # Find first available target from the list
+        for target in target_list:
+            if target in supported_map:
+                return target
+        # None of our preferred targets available
+        return None
+    except ImportError as e:
+        logger.warning(f"Impersonate module not available (curl_cffi may not be installed): {e}")
+        return None
+    except Exception as e:
+        logger.debug(f"Could not build impersonate target for {platform}: {e}")
+        return None
+
 
 SUPPORTED_PLATFORMS = {
     "youtube": {"name": "YouTube", "domains": ["youtube.com", "youtu.be", "google.com"]},
     "tiktok": {"name": "TikTok", "domains": ["tiktok.com", "tiktokv.com"]},
     "douyin": {"name": "抖音", "domains": ["douyin.com", "v.douyin.com", "iesdouyin.com", "live.douyin.com"]},
+    "bilibili": {"name": "Bilibili", "domains": ["bilibili.com", "b23.tv"]},
+    "xiaohongshu": {"name": "小红书", "domains": ["xiaohongshu.com", "xhslink.com", "xhslink.cn"]},
     "facebook": {"name": "Facebook", "domains": ["facebook.com", "fb.com", "fb.watch"]},
     "twitter": {"name": "Twitter/X", "domains": ["twitter.com", "x.com"]},
     "instagram": {"name": "Instagram", "domains": ["instagram.com"]},
@@ -398,6 +492,8 @@ def parse_netscape_cookies(cookies_file: str, platform: str = "douyin") -> dict:
         "facebook": ["facebook.com", "fb.com", "fb.watch"],
         "twitter": ["twitter.com", "x.com"],
         "instagram": ["instagram.com"],
+        "bilibili": ["bilibili.com", "b23.tv"],
+        "xiaohongshu": ["xiaohongshu.com", "xhslink.com"],
     }.get(platform, [])
     logger.info(f"Parsing cookies for platform: {platform}, domain_filter: {domain_filter}")
     try:
@@ -431,7 +527,6 @@ def parse_netscape_cookies(cookies_file: str, platform: str = "douyin") -> dict:
 def validate_cookies_content(cookies_content: str, platform: str) -> tuple[bool, str]:
     """Validate cookies content before saving. Returns (is_valid, message)."""
     import tempfile
-    import os
 
     logger.info(f"Validating cookies for platform: {platform}")
 
@@ -454,6 +549,8 @@ def validate_cookies_content(cookies_content: str, platform: str) -> tuple[bool,
             "facebook": ["c_user", "xs"],
             "twitter": ["auth_token", "ct0"],
             "instagram": ["sessionid", "csrftoken"],
+            "bilibili": ["SESSDATA", "bili_jct", "DedeUserID"],
+            "xiaohongshu": ["xsec_token", "a1", "webId"],
         }
 
         platform_essential = essential_cookies.get(platform, [])
@@ -469,7 +566,7 @@ def validate_cookies_content(cookies_content: str, platform: str) -> tuple[bool,
     finally:
         try:
             os.unlink(temp_path)
-        except:
+        except Exception:
             pass
 
 
@@ -512,12 +609,13 @@ async def download_tiktok_by_api(url: str, output_dir: str, video_id: str, progr
         if cookie_dict:
             cookie_jar = aiohttp.CookieJar()
             from http.cookies import SimpleCookie
+            from yarl import URL
             simple_cookie = SimpleCookie()
             for name, value in cookie_dict.items():
                 simple_cookie[name] = value
                 simple_cookie[name]['domain'] = '.tiktok.com'
                 simple_cookie[name]['path'] = '/'
-            cookie_jar.update_cookies(simple_cookie, "https://www.tiktok.com")
+            cookie_jar.update_cookies(simple_cookie, URL("https://www.tiktok.com"))
             logger.info(f"Loaded {len(cookie_dict)} cookies for TikTok API")
 
     async with aiohttp.ClientSession(headers=headers, cookie_jar=cookie_jar) as session:
@@ -601,7 +699,16 @@ async def download_tiktok_by_api(url: str, output_dir: str, video_id: str, progr
                         logger.warning(f"Endpoint {endpoint['url']} returned non-JSON: {content_type} - {text[:200]}")
                         continue
 
-                    data = await resp.json()
+                    try:
+                        data = await resp.json()
+                    except Exception as e:
+                        logger.warning(f"Failed to parse JSON from {endpoint['url']}: {e}")
+                        continue
+
+                    # Handle None response
+                    if not data:
+                        logger.warning(f"Empty response from {endpoint['url']}")
+                        continue
 
                     # Parse based on endpoint type
                     if endpoint["parser"] in ["tiktok_v1", "tiktok_v2"]:
@@ -764,6 +871,323 @@ def resolve_tiktok_short_url(short_code: str) -> str | None:
     return None
 
 
+# ==================== Bilibili API-based Downloader ====================
+
+async def download_bilibili_by_api(url: str, output_dir: str, video_id: str, progress_cb=None) -> dict:
+    """
+    Download Bilibili video using the official web API.
+
+    ``progress_cb`` (optional) is called with the current file download percentage (0-100).
+    """
+    import aiohttp
+    import aiofiles
+    import subprocess as sp
+
+    # Extract bvid from various URL formats
+    bvid = extract_bilibili_bvid(url)
+    if not bvid:
+        raise Exception("Could not extract Bilibili bvid from URL")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": "https://www.bilibili.com/",
+        "Origin": "https://www.bilibili.com",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-site",
+    }
+
+    async with aiohttp.ClientSession(headers=headers) as session:
+        # Step 1: Get video metadata (title, cid)
+        async with session.get("https://api.bilibili.com/x/web-interface/view", params={"bvid": bvid}) as resp:
+            if resp.status != 200:
+                raise Exception(f"Bilibili API returned {resp.status}")
+            data = await resp.json()
+            if data.get("code") != 0 or not data.get("data"):
+                msg = data.get("message") or data.get("code")
+                raise Exception(f"Bilibili API error: {msg}")
+            video_info = data["data"]
+            title = video_info.get("title", f"Bilibili_{bvid}")
+            cid = video_info.get("cid")
+            if not cid:
+                raise Exception("No cid found in Bilibili API response")
+            title = re.sub(r'[\\/*?:"<>|]', "_", title)[:100]
+
+        logger.info(f"Bilibili title: {title}")
+
+        # Step 2: Get play URLs (DASH video+audio)
+        async with session.get("https://api.bilibili.com/x/player/playurl", params={
+            "cid": cid,
+            "bvid": bvid,
+            "qn": "120",
+            "fnver": "0",
+            "fnval": "16",
+            "fourk": "1",
+        }) as resp:
+            if resp.status != 200:
+                raise Exception(f"Bilibili playurl returned {resp.status}")
+            data = await resp.json()
+            if data.get("code") != 0:
+                raise Exception(f"Bilibili playurl error: {data.get('message')}")
+            pd = data["data"]
+            dash = pd.get("dash", {})
+            durl = pd.get("durl", [])
+
+            video_url = None
+            audio_url = None
+
+            if dash and dash.get("video"):
+                # Prefer highest resolution video stream
+                dash["video"].sort(key=lambda v: int(v.get("height", 0) or 0), reverse=True)
+                video_url = dash["video"][0].get("baseUrl") or dash["video"][0].get("url")
+            if dash and dash.get("audio"):
+                dash["audio"].sort(key=lambda a: int(a.get("id", 0) or 0), reverse=True)
+                audio_url = dash["audio"][0].get("baseUrl") or dash["audio"][0].get("url")
+            elif durl:
+                # Old format: single video with audio embedded (no DASH)
+                video_url = durl[0].get("url")
+                audio_url = None
+
+            if not video_url:
+                raise Exception("No video URL found in Bilibili playurl response")
+
+        # Prepare output files
+        video_path = os.path.join(output_dir, f"{video_id}.mp4")
+        audio_path = os.path.join(output_dir, f"{video_id}_audio.m4s")
+        merged_path = os.path.join(output_dir, f"{video_id}_merged.mp4")
+
+        # Step 3: Download video stream
+        logger.info(f"Downloading Bilibili video: {video_url[:80]}...")
+        await _download_stream(session, video_url, video_path, headers, progress_cb)
+        if not os.path.exists(video_path) or os.path.getsize(video_path) < 1024:
+            raise Exception("Downloaded video file is too small or missing")
+
+        # Step 4: Download audio stream if available
+        if audio_url:
+            logger.info(f"Downloading Bilibili audio: {audio_url[:80]}...")
+            await _download_stream(session, audio_url, audio_path, headers, progress_cb)
+
+        # Step 5: Merge audio+video (or use video-only)
+        if audio_url and os.path.exists(audio_path):
+            logger.info("Merging video+audio with ffmpeg")
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", video_path,
+                "-i", audio_path,
+                "-c", "copy",
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-movflags", "+faststart",
+                merged_path,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **hidden_subprocess_kwargs()
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                raise Exception(f"FFmpeg merge failed: {stderr.decode(errors='ignore')[:500]}")
+            # Replace video_path with merged file
+            shutil.move(merged_path, video_path)
+        elif os.path.exists(video_path):
+            # Video only (audio embedded or not needed) - rename to .mp4
+            pass
+
+        # Clean up temp audio file
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
+
+        duration = video_info.get("duration", 0)
+        logger.info(f"Bilibili video downloaded: {video_path} ({os.path.getsize(video_path)} bytes)")
+
+        return {
+            "video_path": video_path,
+            "title": title,
+            "duration": duration,
+        }
+
+
+def extract_bilibili_bvid(url: str) -> str | None:
+    """Extract Bilibili bvid (BVxxxxx) from various URL formats."""
+    # Direct video URL: https://www.bilibili.com/video/BV17x411w7KC
+    match = re.search(r'bilibili\.com/video/(BV\w+)', url)
+    if match:
+        return match.group(1)
+
+    # Short URL: https://b23.tv/xxx or https://b23.tv/BVxxxxx
+    match = re.search(r'b23\.tv/(BV\w+)', url)
+    if match:
+        return match.group(1)
+
+    # b23.tv short link that redirects
+    match = re.search(r'b23\.tv/([A-Za-z0-9]+)', url)
+    if match:
+        short_code = match.group(1)
+        try:
+            import requests
+            resp = requests.head(f"https://b23.tv/{short_code}", allow_redirects=True, timeout=10)
+            m = re.search(r'BV\w+', resp.url)
+            if m:
+                return m.group(0)
+        except Exception:
+            pass
+
+    return None
+
+
+async def _download_stream(session, url, output_path, headers, progress_cb=None):
+    """Download a single stream with progress reporting."""
+    async with session.get(url, headers=headers) as resp:
+        if resp.status != 200:
+            raise Exception(f"Stream download failed: HTTP {resp.status}")
+        content_length = resp.headers.get("Content-Length", "")
+        total_bytes = int(content_length) if content_length.isdigit() else 0
+        received = 0
+        async with aiofiles.open(output_path, "wb") as f:
+            async for chunk in resp.content.iter_chunked(65536):
+                await f.write(chunk)
+                received += len(chunk)
+                if progress_cb and total_bytes:
+                    progress_cb(received / total_bytes * 100)
+
+
+# ==================== Xiaohongshu downloader ====================
+
+async def download_xiaohongshu_by_api(url: str, output_dir: str, video_id: str, progress_cb=None) -> dict:
+    """
+    Download Xiaohongshu (小红书) video.
+
+    Xiaohongshu requires valid session cookies (xsec_token) for the API to return video data.
+    ``progress_cb`` (optional) is called with the current file download percentage (0-100).
+
+    This function tries the official API first; if it fails (no cookies / expired cookies),
+    it falls back to yt-dlp.
+    """
+    import aiohttp
+    import aiofiles
+    import subprocess as sp
+    import shutil as _shutil
+
+    # Extract note_id from URL patterns
+    note_id = extract_xiaohongshu_note_id(url)
+    if not note_id:
+        raise Exception("Could not extract Xiaohongshu note ID from URL")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": "https://www.xiaohongshu.com/",
+        "Origin": "https://www.xiaohongshu.com",
+    }
+
+    cookies_file = get_cookies_file("xiaohongshu")
+    cookie_dict = {}
+    if cookies_file and os.path.exists(cookies_file):
+        cookie_dict = parse_netscape_cookies(cookies_file, "xiaohongshu")
+        logger.info(f"Loaded {len(cookie_dict)} Xiaohongshu cookies")
+
+    # Try the official API (requires xsec_token / cookies)
+    if cookie_dict:
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                # Build a simple cookie jar from parsed cookies
+                cookie_jar = aiohttp.CookieJar()
+                from http.cookies import SimpleCookie
+                from yarl import URL
+                simple_cookie = SimpleCookie()
+                for name, value in cookie_dict.items():
+                    simple_cookie[name] = value
+                    simple_cookie[name]["domain"] = ".xiaohongshu.com"
+                    simple_cookie[name]["path"] = "/"
+                cookie_jar.update_cookies(simple_cookie, URL("https://www.xiaohongshu.com"))
+
+                # The official feed endpoint returns note details
+                async with session.get(
+                    "https://www.xiaohongshu.com/api/sns/web/v1/feed",
+                    headers={**headers, "Cookie": f"xsec_token={cookie_dict.get('xsec_token', '')}"}
+                ) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"XHS API returned {resp.status}")
+                    data = await resp.json()
+                    if data.get("code") != 0:
+                        raise Exception(f"XHS API error: {data.get('message')}")
+                    # Find the note in the feed
+                    feed_list = data.get("data", {}).get("feed", [])
+                    note = None
+                    for item in feed_list:
+                        if item.get("note", {}).get("noteId") == note_id:
+                            note = item.get("note")
+                            break
+                    if not note:
+                        raise Exception(f"Note {note_id} not found in feed")
+
+                    video_data = note.get("video", {})
+                    if not video_data:
+                        raise Exception("No video in this Xiaohongshu note (it may be an image post)")
+                    title = note.get("title", f"XHS_{note_id}")[:100]
+                    title = re.sub(r'[\\/*?:"<>|]', "_", title)
+
+                    # Get video URL: prefer sns-video-bd.xhscdn.com (no watermark)
+                    media = video_data.get("media", {})
+                    video_url = None
+                    # Try no-watermark source
+                    for src in media.get("stream", {}).get("originVideoKey", []):
+                        video_url = f"http://sns-video-bd.xhscdn.com/{src}"
+                        break
+                    if not video_url:
+                        # Fallback to media URL
+                        video_url = media.get("stream", {}).get("master_url") or media.get("stream", {}).get("url")
+                    if not video_url:
+                        # Try the raw media structure
+                        for key in ["origin_video", "video_url", "stream_url", "video"]:
+                            v = media.get(key, {})
+                            if isinstance(v, dict):
+                                video_url = v.get("url") or v.get("master_url") or v.get("video_media")
+                                if video_url:
+                                    break
+                    if not video_url:
+                        raise Exception(f"Could not find video URL in XHS response")
+
+                    logger.info(f"Xiaohongshu title: {title}")
+                    logger.info(f"Downloading Xiaohongshu video: {video_url[:80]}...")
+
+                    output_path = os.path.join(output_dir, f"{video_id}.mp4")
+                    await _download_stream(session, video_url, output_path, headers, progress_cb)
+                    if not os.path.exists(output_path) or os.path.getsize(output_path) < 1024:
+                        raise Exception("Downloaded video file is too small or missing")
+
+                    logger.info(f"Xiaohongshu video downloaded: {output_path}")
+                    return {
+                        "video_path": output_path,
+                        "title": title,
+                        "duration": 0,
+                    }
+        except Exception as e:
+            logger.warning(f"Xiaohongshu API downloader failed: {e}")
+            raise  # Re-raise to trigger yt-dlp fallback
+
+    # No cookies → fall through to yt-dlp
+    raise Exception("Xiaohongshu download requires cookies (xsec_token). Add them in Settings > Cookies Management.")
+
+
+def extract_xiaohongshu_note_id(url: str) -> str | None:
+    """Extract Xiaohongshu note_id from various URL formats."""
+    # Explore URL: https://www.xiaohongshu.com/explore/683b9f7c000000001000b75e
+    match = re.search(r'xiaohongshu\.com/explore/([A-Za-z0-9]+)', url)
+    if match:
+        return match.group(1)
+    # Note URL: https://www.xiaohongshu.com/user/profile/.../note/...
+    match = re.search(r'xiaohongshu\.com/.*?note/([A-Za-z0-9]+)', url)
+    if match:
+        return match.group(1)
+    # xhslink short URL: https://xhslink.com/abc123 or https://xhslink.cn/abc123
+    match = re.search(r'xhslink\.(com|cn)/([A-Za-z0-9]+)', url)
+    if match:
+        return match.group(2)
+    return None
+
+
 # ==================== yt-dlp downloaders (existing) ====================
 
 async def download_with_pytubefix(url: str, output_dir: str, video_id: str, progress_cb=None) -> dict:
@@ -775,11 +1199,16 @@ async def download_with_pytubefix(url: str, output_dir: str, video_id: str, prog
             if progress_cb and getattr(stream, "filesize", 0):
                 progress_cb((stream.filesize - bytes_remaining) / stream.filesize * 100)
 
+        # Try without use_po_token first — pytubefix 10+ prompts interactively
+        # for the visitorData/PO token when that flag is on, which hangs the
+        # background download. Progressive format 18 (or similar) usually works
+        # without a PO token on Shorts and most public videos.
         yt = YouTube(url, on_progress_callback=_on_progress)
         title = yt.title or "Unknown"
         duration = yt.length or 0
         thumbnail_url = yt.thumbnail_url
 
+        # Try progressive streams first (format 18 works without PO token)
         stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
         if not stream:
             stream = yt.streams.filter(file_extension='mp4').first()
@@ -816,11 +1245,12 @@ def get_platform_ydl_opts(url: str, video_id: str, output_dir: str, cookies_file
     """Get yt-dlp options optimized for specific platforms (updated for yt-dlp 2025+)."""
     output_path = os.path.join(output_dir, f"{video_id}.%(ext)s")
 
-    # Base options common to all platforms
+    # Generic base options — no extractor_args so YouTube-specific logic
+    # never runs on non-YouTube URLs (avoids the video-ID regex on Vimeo etc.)
     base_opts = {
         "outtmpl": output_path,
-        # Use more flexible format selection - try multiple combinations
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best",
+        # Simple generic selector: prefer single-file mp4, no YouTube-specific merge hints
+        "format": "best[ext=mp4]/best",
         "quiet": False,
         "no_warnings": False,
         "extract_flat": False,
@@ -833,12 +1263,10 @@ def get_platform_ydl_opts(url: str, video_id: str, output_dir: str, cookies_file
             }
         ],
         "geo_bypass": True,
-        "retries": 5,  # Increased retries
+        "retries": 5,
         "fragment_retries": 5,
         "skip_unavailable_fragments": True,
-        # Add socket timeout
         "socket_timeout": 30,
-        # Prefer native downloader when possible
         "downloader": "native",
     }
 
@@ -900,6 +1328,34 @@ def get_platform_ydl_opts(url: str, video_id: str, output_dir: str, cookies_file
             "cookies_required": False,  # Helps but not strictly required
             # Additional fallback formats for TikTok
             "format_fallback": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            # Impersonation target to bypass IP/bot detection
+            "impersonate": "chrome-120:windows-10",
+        },
+        "bilibili": {
+            "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Referer": "https://www.bilibili.com/",
+                "Origin": "https://www.bilibili.com",
+            },
+            "geo_bypass_country": "CN",
+            "cookies_required": False,  # Bilibili can work without cookies
+            "format_fallback": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        },
+        "xiaohongshu": {
+            "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Referer": "https://www.xiaohongshu.com/",
+                "Origin": "https://www.xiaohongshu.com",
+            },
+            "geo_bypass_country": "CN",
+            "cookies_required": True,  # Xiaohongshu requires cookies (xsec_token) for video API access
+            "format_fallback": "best[ext=mp4]/best",
         },
         "facebook": {
             "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -910,15 +1366,24 @@ def get_platform_ydl_opts(url: str, video_id: str, output_dir: str, cookies_file
                 "Accept-Encoding": "gzip, deflate, br, zstd",
                 "Referer": "https://www.facebook.com/",
                 "Origin": "https://www.facebook.com",
-            },
-            "extractor_args": {
-                "facebook": {
-                    "api_version": "v21.0",
-                }
+                # Facebook Tahoe API requires these headers
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
             },
             "geo_bypass_country": "US",
-            "cookies_required": True,  # Most Facebook videos require login
+            # Facebook 2025: requires BOTH cookies AND impersonation to bypass Tahoe API fingerprinting
+            # - Cookies provide session auth
+            # - Impersonation (curl_cffi) provides browser fingerprint matching
+            # Note: Adding cookies + impersonation together typically works for public videos
+            "cookies_required": True,  # Now requires cookies + impersonation
             "format_fallback": "best[ext=mp4]/best",
+            "impersonate": "chrome-120:windows-10",
         },
         "twitter": {
             "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -930,14 +1395,10 @@ def get_platform_ydl_opts(url: str, video_id: str, output_dir: str, cookies_file
                 "Referer": "https://x.com/",
                 "Origin": "https://x.com",
             },
-            "extractor_args": {
-                "twitter": {
-                    "api_version": "2",
-                }
-            },
             "geo_bypass_country": "US",
             "cookies_required": True,  # Twitter/X requires login for most videos
             "format_fallback": "best[ext=mp4]/best",
+            "impersonate": "chrome-120:windows-10",
         },
         "instagram": {
             "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -948,15 +1409,22 @@ def get_platform_ydl_opts(url: str, video_id: str, output_dir: str, cookies_file
                 "Accept-Encoding": "gzip, deflate, br, zstd",
                 "Referer": "https://www.instagram.com/",
                 "Origin": "https://www.instagram.com",
-            },
-            "extractor_args": {
-                "instagram": {
-                    "api_version": "v1",
-                }
+                # Instagram requires these headers for API access
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
             },
             "geo_bypass_country": "US",
-            "cookies_required": True,  # Instagram requires login for most content
+            # Instagram 2025: requires cookies + impersonation
+            # - JSONDecodeError usually means missing/invalid cookies or blocked API
+            "cookies_required": True,  # Instagram requires login cookies
             "format_fallback": "best[ext=mp4]/best",
+            "impersonate": "chrome-120:windows-10",
         },
         "youtube": {
             "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -964,15 +1432,20 @@ def get_platform_ydl_opts(url: str, video_id: str, output_dir: str, cookies_file
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                 "Accept-Language": "en-US,en;q=0.9",
             },
+            # YouTube 2025+:
+            # - Format 18 (progressive mp4) works without PO token on web/mobile clients
+            # - tv_embedded/tv_simply require PO token and are unreliable
+            # - skip ["dash", "hls"] keeps progressive formats as fallback
+            # - innertube_host omitted to avoid DNS resolution bug ('Failed to resolve w')
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["web", "mweb", "android", "tv_embedded"],
+                    "player_client": ["web", "mweb", "android", "ios"],
                     "skip": ["dash", "hls"],
-                    "innertube_host": "www.youtube.com",
                 }
             },
             "geo_bypass_country": "US",
             "cookies_required": False,
+            "format_fallback": "18/best[ext=mp4]/best",
         },
         "vimeo": {
             "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -984,14 +1457,15 @@ def get_platform_ydl_opts(url: str, video_id: str, output_dir: str, cookies_file
                 "Referer": "https://vimeo.com/",
                 "Origin": "https://vimeo.com",
             },
+            "geo_bypass_country": "US",
+            "cookies_required": True,  # Vimeo web client requires login (macos OAuth fails on Windows)
+            "format_fallback": "best[ext=mp4]/best",
             "extractor_args": {
                 "vimeo": {
-                    "api_version": "3",
+                    "skip": ["dash", "hls"],
                 }
             },
-            "geo_bypass_country": "US",
-            "cookies_required": False,
-            "format_fallback": "best[ext=mp4]/best",
+            "impersonate": "chrome-120:windows-10",
         },
         "twitch": {
             "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -1003,14 +1477,14 @@ def get_platform_ydl_opts(url: str, video_id: str, output_dir: str, cookies_file
                 "Referer": "https://www.twitch.tv/",
                 "Origin": "https://www.twitch.tv",
             },
-            "extractor_args": {
-                "twitch": {
-                    "api_version": "5",
-                }
-            },
             "geo_bypass_country": "US",
             "cookies_required": False,  # Twitch VODs often work without login
             "format_fallback": "best[ext=mp4]/best",
+            "extractor_args": {
+                "twitch": {
+                    "skip": ["dash", "hls"],
+                }
+            },
         },
     }
 
@@ -1019,7 +1493,8 @@ def get_platform_ydl_opts(url: str, video_id: str, output_dir: str, cookies_file
     # Merge base options with platform-specific options
     ydl_opts = base_opts.copy()
     ydl_opts["http_headers"] = config["http_headers"]
-    ydl_opts["extractor_args"] = config["extractor_args"]
+    if "extractor_args" in config:
+        ydl_opts["extractor_args"] = config["extractor_args"]
     ydl_opts["geo_bypass_country"] = config["geo_bypass_country"]
 
     # Override format if platform has fallback
@@ -1030,6 +1505,77 @@ def get_platform_ydl_opts(url: str, video_id: str, output_dir: str, cookies_file
     if cookies_file:
         ydl_opts["cookiefile"] = cookies_file
         logger.info(f"Using cookies for {platform}: {cookies_file}")
+    elif config.get("cookies_required"):
+        logger.warning(
+            f"============================================================\n"
+            f"{platform.upper()} DOWNLOAD MAY REQUIRE COOKIES!\n"
+            f"Please add {platform} cookies in Settings -> Cookies Management.\n"
+            f"1. Install 'Get cookies.txt LOCALLY' browser extension\n"
+            f"2. Login to {SUPPORTED_PLATFORMS[platform]['domains'][0]} in your browser\n"
+            f"3. Export cookies.txt from the extension\n"
+            f"4. Paste into Settings -> Cookies Management -> {SUPPORTED_PLATFORMS[platform]['name']}\n"
+            f"============================================================"
+        )
+
+    # Add impersonation target for platforms that need it (bypasses IP blocks / bot detection).
+    # yt-dlp accepts impersonate as a string like "chrome-120:windows-10"
+    if "impersonate" in config and config["impersonate"]:
+        target_str = _build_impersonate_target(platform)
+        # For Facebook: force generic "chrome" target which works best with curl_cffi
+        if platform == "facebook" and target_str is None:
+            # Try generic chrome as last resort
+            try:
+                from yt_dlp.networking.impersonate import ImpersonateTarget
+                supported_map = getattr(ImpersonateTarget, '_SUPPORTED_IMPERSONATE_TARGET_MAP', {})
+                if "chrome" in supported_map:
+                    target_str = "chrome"
+                    logger.info("Using generic 'chrome' impersonation for Facebook (fallback)")
+            except Exception:
+                pass
+        if target_str:
+            ydl_opts["impersonate"] = target_str
+            logger.info(f"Impersonating {platform} as {target_str} to bypass bot detection")
+        else:
+            # Impersonation unavailable (curl_cffi not installed or target not supported)
+            logger.warning(f"Impersonation unavailable for {platform}. "
+                          f"Install curl_cffi: pip install curl_cffi")
+            if platform == "facebook":
+                logger.warning(
+                    f"============================================================\n"
+                    f"FACEBOOK DOWNLOAD WILL FAIL WITHOUT IMPERSONATION!\n"
+                    f"Facebook's Tahoe API requires both cookies AND impersonation.\n"
+                    f"1. Install curl_cffi: pip install curl_cffi\n"
+                    f"2. Add Facebook cookies in Settings -> Cookies Management\n"
+                    f"============================================================"
+                )
+            elif platform == "instagram":
+                logger.warning(
+                    f"============================================================\n"
+                    f"INSTAGRAM DOWNLOAD WILL FAIL WITHOUT COOKIES!\n"
+                    f"Instagram requires login cookies (sessionid, csrftoken).\n"
+                    f"1. Install curl_cffi: pip install curl_cffi\n"
+                    f"2. Add Instagram cookies in Settings -> Cookies Management\n"
+                    f"   Export from 'Get cookies.txt LOCALLY' extension after login.\n"
+                    f"============================================================"
+                )
+            elif platform == "vimeo":
+                logger.warning(
+                    f"============================================================\n"
+                    f"VIMEO DOWNLOAD WILL FAIL WITHOUT COOKIES!\n"
+                    f"Vimeo requires OAuth token (macOS Keychain doesn't work on Windows).\n"
+                    f"Please add Vimeo cookies in Settings -> Cookies Management.\n"
+                    f"============================================================"
+                )
+    else:
+        logger.debug(f"No impersonate config for {platform}")
+
+    # Debug: log cookies file being used
+    if cookies_file:
+        try:
+            file_size = os.path.getsize(cookies_file)
+            logger.debug(f"Using cookies file: {cookies_file} (size: {file_size} bytes)")
+        except Exception:
+            logger.debug(f"Using cookies file: {cookies_file}")
     elif config.get("cookies_required"):
         logger.warning(
             f"============================================================\n"
@@ -1108,6 +1654,7 @@ async def download_with_ytdlp(url: str, output_dir: str, video_id: str, progress
             "best",
         ],
         "youtube": [
+            "18/best[ext=mp4]/best",
             "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best",
             "best[ext=mp4]/best",
             "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
@@ -1267,6 +1814,76 @@ async def download_video(url: str, output_dir: str = str(TEMP_DIR), progress_cb=
             last_error = e
             # Fall through to yt-dlp fallback
 
+    # For Bilibili, try API-based downloader first (more reliable than yt-dlp which may get 412)
+    if platform == "bilibili":
+        try:
+            logger.info("Trying Bilibili API-based downloader...")
+
+            cookies_file = get_cookies_file("bilibili")
+            if cookies_file:
+                logger.info(f"Found Bilibili cookies: {cookies_file}")
+            else:
+                logger.info("No Bilibili cookies — public API still returns video streams")
+
+            result = await download_bilibili_by_api(url, output_dir, video_id, progress_cb=progress_cb)
+
+            import shutil as _shutil
+            thumbnail_file = None
+            for f in os.listdir(output_dir):
+                if f.startswith(video_id) and f.endswith(('.jpg', '.webp', '.png')):
+                    thumbnail_file = os.path.join(output_dir, f)
+                    break
+
+            return {
+                "video_path": result["video_path"],
+                "thumbnail_path": thumbnail_file,
+                "title": result.get("title", "Unknown"),
+                "duration": result.get("duration", 0),
+            }
+        except Exception as e:
+            logger.warning(f"Bilibili API downloader failed: {e}")
+            last_error = e
+            # Fall through to yt-dlp fallback
+
+    # For Xiaohongshu, try API-based downloader first (requires cookies/xsec_token)
+    if platform == "xiaohongshu":
+        try:
+            logger.info("Trying Xiaohongshu API-based downloader...")
+
+            cookies_file = get_cookies_file("xiaohongshu")
+            if not cookies_file:
+                logger.warning(
+                    "============================================================\n"
+                    "XIAOHONGSHU DOWNLOAD REQUIRES COOKIES (xsec_token)!\n"
+                    "Please add Xiaohongshu cookies in Settings -> Cookies Management.\n"
+                    "1. Install 'Get cookies.txt LOCALLY' browser extension\n"
+                    "2. Login to xiaohongshu.com in your browser\n"
+                    "3. Export cookies.txt from the extension\n"
+                    "4. Paste into Settings -> Cookies Management -> 小红书\n"
+                    "============================================================"
+                )
+            else:
+                logger.info(f"Found Xiaohongshu cookies: {cookies_file}")
+
+            result = await download_xiaohongshu_by_api(url, output_dir, video_id, progress_cb=progress_cb)
+
+            thumbnail_file = None
+            for f in os.listdir(output_dir):
+                if f.startswith(video_id) and f.endswith(('.jpg', '.webp', '.png')):
+                    thumbnail_file = os.path.join(output_dir, f)
+                    break
+
+            return {
+                "video_path": result["video_path"],
+                "thumbnail_path": thumbnail_file,
+                "title": result.get("title", "Unknown"),
+                "duration": result.get("duration", 0),
+            }
+        except Exception as e:
+            logger.warning(f"Xiaohongshu API downloader failed: {e}")
+            last_error = e
+            # Fall through to yt-dlp fallback
+
     # For YouTube, try pytubefix first (faster, no ffmpeg needed for merge)
     if platform == "youtube":
         try:
@@ -1300,16 +1917,18 @@ async def download_video(url: str, output_dir: str = str(TEMP_DIR), progress_cb=
     try:
         logger.info(f"Trying yt-dlp for {platform}...")
 
-        # For platforms that typically require cookies, warn if not available
-        cookies_required_platforms = ["douyin", "tiktok", "facebook", "twitter", "instagram"]
+        # For platforms that typically require cookies, warn if not available.
+        # Facebook now requires cookies + impersonation (2025 Tahoe API fingerprinting).
+        # Instagram, Twitter, Vimeo, Douyin, TikTok, Xiaohongshu also require cookies.
+        cookies_required_platforms = ["douyin", "tiktok", "twitter", "instagram", "facebook", "xiaohongshu", "vimeo"]
+        cookies_file = get_cookies_file(platform) if platform else None
         if platform in cookies_required_platforms:
-            cookies_file = get_cookies_file(platform)
             if not cookies_file:
                 platform_name = SUPPORTED_PLATFORMS[platform]["name"]
                 domain = SUPPORTED_PLATFORMS[platform]["domains"][0]
                 logger.warning(
                     f"============================================================\n"
-                    f"{platform_name.upper()} DOWNLOAD MAY REQUIRE COOKIES!\n"
+                    f"{platform_name.upper()} DOWNLOAD REQUIRES COOKIES!\n"
                     f"Please add {platform_name} cookies in Settings -> Cookies Management.\n"
                     f"1. Install 'Get cookies.txt LOCALLY' browser extension\n"
                     f"2. Login to {domain} in your browser\n"
@@ -1347,30 +1966,7 @@ async def download_video(url: str, output_dir: str = str(TEMP_DIR), progress_cb=
         logger.error(f"yt-dlp failed: {e}")
         last_error = e
 
-    # Final fallback: try pytubefix for non-YouTube, non-Douyin (some sites may work)
-    if platform not in ["youtube", "douyin"]:
-        try:
-            logger.info("Trying pytubefix as fallback...")
-            result = await download_with_pytubefix(url, output_dir, video_id, progress_cb=progress_cb)
-
-            video_file = None
-            for f in os.listdir(output_dir):
-                if f.startswith(video_id) and f.endswith(('.mp4', '.webm', '.mkv')):
-                    video_file = os.path.join(output_dir, f)
-                    break
-
-            if video_file:
-                return {
-                    "video_path": video_file,
-                    "thumbnail_path": None,
-                    "title": result.get("title", "Unknown"),
-                    "duration": result.get("duration", 0),
-                }
-        except Exception as e:
-            logger.error(f"pytubefix fallback failed: {e}")
-            last_error = e
-
-    raise Exception(f"Không thể tải video: {last_error}")
+    raise Exception(f"Cannot download video: {last_error}")
 
 
 def save_cookies(platform: str, cookies_content: str) -> bool:

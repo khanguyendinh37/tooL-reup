@@ -221,6 +221,16 @@ export async function deleteHistoryItem(id: string) {
   return res.json()
 }
 
+export async function deleteHistoryItems(ids: string[]) {
+  const res = await apiFetch(`${API_BASE}/history/batch`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  })
+  if (!res.ok) await throwApiError(res, 'Không thể xóa các mục lịch sử')
+  return res.json()
+}
+
 export async function getSettings() {
   const res = await apiFetch(`${API_BASE}/settings`)
   if (!res.ok) await throwApiError(res, 'Không thể tải cài đặt')

@@ -13,6 +13,10 @@ const MAX_CONSECUTIVE_POLL_ERRORS = 5
 const MAX_SERVER_IDLE_MS = 15 * 60 * 1000
 // Safety net for a phase that keeps reporting activity but never finishes.
 const MAX_PHASE_RUNTIME_MS = 2 * 60 * 60 * 1000
+// The download phase has a shorter watchdog: yt-dlp/pytubefix can hang
+// silently (bot-detection prompts, blocked IPs), so we abort after 90 s
+// instead of letting the UI spin forever.
+const MAX_DOWNLOAD_IDLE_MS = 90 * 1000
 const TERMINAL_STATUSES: JobStatus[] = ['preview_ready', 'completed', 'error', 'cancelled']
 
 function isJobStatus(value: string): value is JobStatus {
@@ -132,11 +136,18 @@ export default function useActiveDubbingMonitor() {
         if (!TERMINAL_STATUSES.includes(nextStatus)) {
           const stalled = Date.now() - lastServerActivityAt >= MAX_SERVER_IDLE_MS
           const tooLong = Date.now() - phaseStartedAt >= MAX_PHASE_RUNTIME_MS
+          // pytubefix / yt-dlp can hang silently while waiting for a PO
+          // token prompt or a captcha. Surface a friendlier error sooner
+          // than the 15-minute global idle budget.
+          const downloadStuck = nextStatus === 'downloading'
+            && Date.now() - lastServerActivityAt >= MAX_DOWNLOAD_IDLE_MS
 
-          if (stalled || tooLong) {
-            const message = stalled
-              ? `Không thấy tiến trình mới trong ${MAX_SERVER_IDLE_MS / 60000} phút nên đã dừng theo dõi. Quy trình có thể bị gián đoạn — bạn hãy thử lại.`
-              : 'Quy trình chạy quá lâu nên đã dừng theo dõi để tránh treo vô hạn. Bạn có thể thử lại.'
+          if (stalled || tooLong || downloadStuck) {
+            const message = downloadStuck
+              ? `Không nhận được tiến trình tải xuống trong ${MAX_DOWNLOAD_IDLE_MS / 1000} giây. Có thể máy chủ video đang chặn yêu cầu (cookie, captcha, hoặc khu vực). Vui lòng thử lại hoặc cập nhật cookies cho ${nextStatus === 'downloading' ? 'nền tảng này' : 'nền tảng này'}.`
+              : stalled
+                ? `Không thấy tiến trình mới trong ${MAX_SERVER_IDLE_MS / 60000} phút nên đã dừng theo dõi. Quy trình có thể bị gián đoạn — bạn hãy thử lại.`
+                : 'Quy trình chạy quá lâu nên đã dừng theo dõi để tránh treo vô hạn. Bạn có thể thử lại.'
             patchActiveWorkflow({
               status: 'error',
               phase: 'error',

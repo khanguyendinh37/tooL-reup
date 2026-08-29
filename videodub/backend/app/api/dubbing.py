@@ -19,6 +19,9 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
+# Track running pipeline tasks so they can be cancelled from the UI
+RUNNING_TASKS: dict[str, asyncio.Task] = {}
+
 
 def _build_processing_config(
     source_lang: str,

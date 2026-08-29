@@ -1,0 +1,139 @@
+name: Build Release
+
+# Trigger on version tags (v1.0.0, v1.2.3, ...) and manual dispatch.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Phiên bản (ví dụ: 1.0.0)"
+        required: false
+        default: "manual"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install FFmpeg (winget)
+        run: |
+          winget install ffmpeg --silent
+
+      - name: Build Windows Desktop
+        run: |
+          cd videodub
+          desktop\build.bat
+
+      - name: Prepare Windows artifact
+        shell: bash
+        run: |
+          cd videodub/desktop/dist
+          7z.exe a -t zip ../VideoDub-windows.zip VideoDub
+
+      - name: Upload Windows to GitHub Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.event.inputs.version || github.ref_name }}
+          name: VideoDub ${{ github.event.inputs.version || github.ref_name }}
+          files: videodub/desktop/dist/VideoDub-windows.zip
+          body: |
+            ## VideoDub Desktop (Windows)
+            - Portable `.exe` — không cần cài đặt
+            - Dữ liệu lưu tại `%LOCALAPPDATA%\VideoDub\`
+            - Yêu cầu: Windows 10/11, FFmpeg, WebView2 Runtime (có sẵn trên Win 10/11)
+
+            ### Cách dùng
+            ```bat
+            # 1. Giải nén file zip
+            # 2. Double-click VideoDub.exe
+            ```
+
+            ### Hỗ trợ
+            - Backend API: http://localhost:8000
+            - API Docs: http://localhost:8000/docs
+            - Xem chi tiết: videodub/desktop/README.md
+
+  build-macos:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install FFmpeg (Homebrew)
+        run: brew install ffmpeg
+
+      - name: Install Xcode Command Line Tools
+        run: |
+          if ! xcode-select -p &>/dev/null; then
+            xcode-select --install
+            # Wait for install to complete (up to 5 minutes)
+            while ! xcode-select -p &>/dev/null; do sleep 10; done
+          fi
+          sudo xcode-select --switch /Library/Developer/CommandLineTools
+
+      - name: Build macOS Desktop
+        run: |
+          chmod +x videodub/desktop/build_macos.sh
+          ./videodub/desktop/build_macos.sh
+
+      - name: Prepare macOS artifact
+        shell: bash
+        run: |
+          cd videodub/desktop/dist
+          zip -r ../VideoDub-macos.zip VideoDub.app
+
+      - name: Upload macOS to GitHub Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.event.inputs.version || github.ref_name }}
+          name: VideoDub ${{ github.event.inputs.version || github.ref_name }}
+          files: videodub/desktop/dist/VideoDub-macos.zip
+          body: |
+            ## VideoDub Desktop (macOS)
+            - Native `.app` bundle — không cần cài đặt
+            - Dữ liệu lưu tại `~/.local/share/VideoDub/`
+            - Yêu cầu: macOS 12+, Python 3.11+, Node.js 20+
+
+            ### Cách dùng
+            ```bash
+            # 1. Giải nén file zip
+            # 2. Chuột phải → Open (lần đầu để vượt Gatekeeper)
+            # 3. Chuyển vào Applications
+            ```
+
+            ### Hỗ trợ
+            - Backend API: http://localhost:8000
+            - API Docs: http://localhost:8000/docs
+            - Xem chi tiết: videodub/desktop/README_desktop_macos.md

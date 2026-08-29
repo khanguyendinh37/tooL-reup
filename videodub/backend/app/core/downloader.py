@@ -1884,6 +1884,55 @@ async def download_video(url: str, output_dir: str = str(TEMP_DIR), progress_cb=
             last_error = e
             # Fall through to yt-dlp fallback
 
+    # For Facebook, use the isolated downloader (Tahoe API 2025: cookies + impersonation).
+    # If it fails (SocialDownloaderError), fall through to the generic yt-dlp path
+    # below, which still has Facebook's platform config baked in.
+    if platform == "facebook":
+        try:
+            from app.core.social_downloaders import (
+                download_facebook,
+                SocialDownloaderError,
+            )
+
+            logger.info("Trying isolated Facebook downloader...")
+            result = await download_facebook(
+                url, output_dir, video_id, progress_cb=progress_cb
+            )
+            return {
+                "video_path": result["video_path"],
+                "thumbnail_path": result.get("thumbnail_path"),
+                "title": result.get("title", "Unknown"),
+                "duration": result.get("duration", 0),
+            }
+        except SocialDownloaderError as e:
+            logger.warning("Isolated Facebook downloader failed: %s", e)
+            last_error = e
+            # Fall through to yt-dlp fallback
+
+    # For Instagram, use the isolated downloader (cookie-based auth).
+    # Same contract as Facebook: SocialDownloaderError -> yt-dlp fallback.
+    if platform == "instagram":
+        try:
+            from app.core.social_downloaders import (
+                download_instagram,
+                SocialDownloaderError,
+            )
+
+            logger.info("Trying isolated Instagram downloader...")
+            result = await download_instagram(
+                url, output_dir, video_id, progress_cb=progress_cb
+            )
+            return {
+                "video_path": result["video_path"],
+                "thumbnail_path": result.get("thumbnail_path"),
+                "title": result.get("title", "Unknown"),
+                "duration": result.get("duration", 0),
+            }
+        except SocialDownloaderError as e:
+            logger.warning("Isolated Instagram downloader failed: %s", e)
+            last_error = e
+            # Fall through to yt-dlp fallback
+
     # For YouTube, try pytubefix first (faster, no ffmpeg needed for merge)
     if platform == "youtube":
         try:

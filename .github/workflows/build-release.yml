@@ -28,12 +28,19 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
+          cache-dependency-path: "videodub/frontend/package-lock.json"
 
-      - name: Install FFmpeg (winget)
+      - name: Install FFmpeg (Chocolatey)
         run: |
-          winget install ffmpeg --silent
+          choco install ffmpeg -y --no-progress
+          echo "C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin" >> $GITHUB_PATH
+
+      - name: Verify FFmpeg
+        run: |
+          ffmpeg -version
+          ffprobe -version
 
       - name: Build Windows Desktop
         run: |
@@ -58,7 +65,7 @@ jobs:
             ## VideoDub Desktop (Windows)
             - Portable `.exe` — không cần cài đặt
             - Dữ liệu lưu tại `%LOCALAPPDATA%\VideoDub\`
-            - Yêu cầu: Windows 10/11, FFmpeg, WebView2 Runtime (có sẵn trên Win 10/11)
+            - Yêu cầu: Windows 10/11, WebView2 Runtime (có sẵn trên Win 10/11)
 
             ### Cách dùng
             ```bat
@@ -86,8 +93,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
+          cache-dependency-path: "videodub/frontend/package-lock.json"
 
       - name: Install FFmpeg (Homebrew)
         run: brew install ffmpeg

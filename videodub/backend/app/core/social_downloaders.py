@@ -24,6 +24,7 @@ Instagram requires the same two factors (cookies + impersonation), plus the
 
 import logging
 import os
+import re
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -37,32 +38,35 @@ class SocialDownloaderError(Exception):
 # Browser impersonation targets (yt-dlp + curl_cffi)
 # ---------------------------------------------------------------------------
 # These targets are tried in order. The first one that curl_cffi knows about
-# wins. Order matters: chrome-120 is the most widely compiled-in target.
+# wins. Keep a Windows target first because the desktop app runs on Windows;
+# the older Chrome 110 fingerprint is available across current curl_cffi builds.
 _FACEBOOK_IMPERSONATE_TARGETS: list[str] = [
-    "chrome-120:windows-10",
-    "chrome-131:windows-10",
-    "edge-120:windows-10",
-    "chrome-120:macos-14",
+    "chrome-110:windows-10",
+    "chrome-99:windows-10",
+    "edge-101:windows-10",
     "chrome-131:macos-14",
+    "chrome-120:macos-14",
+    "chrome",
 ]
 
 _INSTAGRAM_IMPERSONATE_TARGETS: list[str] = [
-    "chrome-120:windows-10",
-    "chrome-131:windows-10",
-    "edge-120:windows-10",
-    "chrome-120:macos-14",
+    "chrome-110:windows-10",
+    "chrome-99:windows-10",
+    "edge-101:windows-10",
     "chrome-131:macos-14",
+    "chrome-120:macos-14",
+    "chrome",
 ]
 
 # User-Agents that match the impersonation targets above (Tahoe API 2025).
 _FACEBOOK_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
 )
 
 _INSTAGRAM_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
 )
 
 # Last-resort browser fingerprint for older curl_cffi builds that only ship a
@@ -74,69 +78,66 @@ _GENERIC_CHROME_FALLBACK = "chrome"
 # Helpers
 # ---------------------------------------------------------------------------
 def _get_supported_impersonate_map() -> dict[str, Any]:
-    """Return the map of impersonation targets known to the installed yt-dlp.
+    """Return yt-dlp's actual curl_cffi target map keyed by target string.
 
-    Returns an empty dict if yt-dlp is too old, curl_cffi is not installed,
-    or anything else goes wrong. Callers should treat an empty dict as
-    "impersonation unavailable" and log accordingly.
+    ``ImpersonateTarget`` only describes a target and does not own the
+    supported-target registry. The registry belongs to ``CurlCFFIRH``. Reading
+    the wrong class makes every target look unavailable even when curl_cffi is
+    installed, which was the failure shown in the Facebook log.
     """
     try:
-        from yt_dlp.networking.impersonate import ImpersonateTarget
+        from yt_dlp.networking._curlcffi import CurlCFFIRH
 
-        return getattr(ImpersonateTarget, "_SUPPORTED_IMPERSONATE_TARGET_MAP", {})
+        supported = getattr(CurlCFFIRH, "_SUPPORTED_IMPERSONATE_TARGET_MAP", {})
+        return {str(target): handler for target, handler in supported.items()}
     except Exception:
         return {}
 
 
 def _build_impersonate_target(target_list: list[str]) -> Optional[str]:
-    """Return the first available impersonate target from ``target_list``.
-
-    Falls back to ``"chrome"`` (a generic target that older curl_cffi builds
-    still ship) when nothing in the explicit list is available, and finally
-    returns ``None`` when even that fails — in which case the caller should
-    warn the user to install/update curl_cffi.
-    """
+    """Return the first supported target, including a generic Chrome match."""
     supported = _get_supported_impersonate_map()
     if not supported:
         return None
+
     for target in target_list:
         if target in supported:
             return target
-    if _GENERIC_CHROME_FALLBACK in supported:
-        return _GENERIC_CHROME_FALLBACK
+
+    # Newer curl_cffi versions expose concrete targets only. Resolve the
+    # generic ``chrome`` alias to the newest concrete Chrome target available.
+    if _GENERIC_CHROME_FALLBACK in target_list:
+        for target in supported:
+            if target == _GENERIC_CHROME_FALLBACK or target.startswith("chrome-"):
+                return target
     return None
 
 
 def _curl_cffi_compatible() -> bool:
-    """Return True if the installed curl_cffi version is known to work with yt-dlp.
+    """Return True when installed curl_cffi is supported by this yt-dlp build.
 
-    yt-dlp supports curl_cffi 0.5.10 and 0.10.x through 0.15.x. Anything else
-    may load the module but silently break impersonation at runtime. We do
-    not refuse to run in that case — we just log a warning — so users with
-    unusual Python environments aren't blocked.
+    Current yt-dlp supports curl_cffi 0.5.10 and 0.10.x through 0.16.x. The
+    previous upper bound incorrectly rejected the current 0.16.x line.
     """
     try:
         import curl_cffi
-    except Exception:
-        return False
-    try:
         import yt_dlp  # noqa: F401  (presence confirms compatibility can be checked)
     except Exception:
         return False
 
     version_str = getattr(curl_cffi, "__version__", "0.0.0")
     try:
-        parts = [int(x) for x in str(version_str).split(".")[:2] if x.isdigit()]
+        parts = [int(part) for part in re.split(r"[^0-9]+", str(version_str)) if part][:3]
         version = tuple(parts)
     except (ValueError, AttributeError):
-        version = (0, 0)
+        version = (0, 0, 0)
 
-    supported = (version == (0, 5)) or ((0, 10) <= version < (0, 16))
+    supported = version[:2] == (0, 5) or (0, 10) <= version[:2] < (0, 17)
     if not supported:
         logger.warning(
             "curl_cffi %s may be incompatible with yt-dlp. "
-            "Supported: 0.5.10, 0.10.x-0.15.x. "
-            "Fix: pip install 'yt-dlp[default,curl_cffi]'",
+            "Supported: 0.5.10, 0.10.x-0.16.x. "
+            "Fix: pip install -U 'yt-dlp[default,curl_cffi]'",
             version_str,
         )
     return supported
@@ -207,7 +208,7 @@ def _facebook_http_headers() -> dict[str, str]:
             "image/avif,image/webp,image/apng,*/*;q=0.8"
         ),
         "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Accept-Encoding": "gzip, deflate, br",
         "Referer": "https://www.facebook.com/",
         "Origin": "https://www.facebook.com",
         "Sec-Fetch-Dest": "document",
@@ -215,7 +216,7 @@ def _facebook_http_headers() -> dict[str, str]:
         "Sec-Fetch-Site": "same-origin",
         "Sec-Fetch-User": "?1",
         "Upgrade-Insecure-Requests": "1",
-        "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "Sec-Ch-Ua": '"Google Chrome";v="110", "Chromium";v="110", "Not_A Brand";v="24"',
         "Sec-Ch-Ua-Mobile": "?0",
         "Sec-Ch-Ua-Platform": '"Windows"',
     }
@@ -230,7 +231,7 @@ def _instagram_http_headers() -> dict[str, str]:
             "image/avif,image/webp,image/apng,*/*;q=0.8"
         ),
         "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Accept-Encoding": "gzip, deflate, br",
         "Referer": "https://www.instagram.com/",
         "Origin": "https://www.instagram.com",
         "Sec-Fetch-Dest": "document",
@@ -238,7 +239,7 @@ def _instagram_http_headers() -> dict[str, str]:
         "Sec-Fetch-Site": "same-origin",
         "Sec-Fetch-User": "?1",
         "Upgrade-Insecure-Requests": "1",
-        "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "Sec-Ch-Ua": '"Google Chrome";v="110", "Chromium";v="110", "Not_A Brand";v="24"',
         "Sec-Ch-Ua-Mobile": "?0",
         "Sec-Ch-Ua-Platform": '"Windows"',
     }
@@ -248,12 +249,16 @@ def _instagram_http_headers() -> dict[str, str]:
 # yt-dlp option builders
 # ---------------------------------------------------------------------------
 def _base_ydl_options(output_dir: str, video_id: str) -> dict[str, Any]:
-    """Shared yt-dlp options that do not depend on the platform."""
+    """Shared yt-dlp options for the Facebook/Instagram downloaders only."""
     output_path = os.path.join(output_dir, f"{video_id}.%(ext)s")
     return {
         "outtmpl": output_path,
-        # Single-file mp4 first; merge fallback is handled by yt-dlp itself.
-        "format": "best[ext=mp4]/best",
+        # Reels frequently expose separate video/audio streams. Let yt-dlp
+        # merge them instead of rejecting the video because no single mp4
+        # format exists.
+        "format": "bv*+ba/best",
+        "merge_output_format": "mp4",
+        "noplaylist": True,
         "quiet": False,
         "no_warnings": False,
         "extract_flat": False,
@@ -265,10 +270,26 @@ def _base_ydl_options(output_dir: str, video_id: str) -> dict[str, Any]:
         "geo_bypass": True,
         "retries": 5,
         "fragment_retries": 5,
+        "extractor_retries": 3,
         "skip_unavailable_fragments": True,
         "socket_timeout": 30,
         "downloader": "native",
     }
+
+
+def _find_downloaded_video(output_dir: str, video_id: str) -> Optional[str]:
+    """Find the final media file emitted by yt-dlp for a social URL."""
+    preferred = os.path.join(output_dir, f"{video_id}.mp4")
+    if os.path.isfile(preferred):
+        return preferred
+
+    extensions = (".mp4", ".webm", ".mkv", ".mov", ".avi")
+    candidates = [
+        os.path.join(output_dir, name)
+        for name in os.listdir(output_dir)
+        if name.startswith(video_id) and name.endswith(extensions)
+    ]
+    return candidates[0] if candidates else None
 
 
 def build_facebook_ydl_options(

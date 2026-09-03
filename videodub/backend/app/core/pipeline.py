@@ -577,7 +577,7 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
         tts_dir = os.path.join(job_dir, "tts")
         rate = speed_to_rate(tts_speed)
         audio_files = await generate_dubbing_audio(
-            translated_segments, voice, tts_dir, rate
+            translated_segments, voice, tts_dir, rate, target_lang=target_lang
         )
         if len(audio_files) != expected_audio_count:
             raise RuntimeError(

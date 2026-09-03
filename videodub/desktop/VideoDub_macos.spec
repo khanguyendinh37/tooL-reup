@@ -1,13 +1,16 @@
-# PyInstaller onedir specification for the VideoDub macOS .app bundle.
+# PyInstaller onedir specification for the VideoDub desktop app on macOS.
+# Run with: pyinstaller --noconfirm --clean VideoDub_macos.spec
 from pathlib import Path
 
-from PyInstaller.building.build_main import Analysis, BUNDLE, COLLECT, EXE, PYZ
+from PyInstaller.building.build_main import Analysis, COLLECT, EXE, PYZ
 from PyInstaller.utils.hooks import collect_all
+
 
 ROOT = Path(SPEC).resolve().parents[1]
 BACKEND_DIR = ROOT / "backend"
 FRONTEND_DIST = ROOT / "frontend" / "dist"
 FFMPEG_DIR = ROOT / "desktop" / "vendor" / "ffmpeg"
+
 
 datas = [
     (str(FRONTEND_DIST), "frontend_dist"),
@@ -15,6 +18,7 @@ datas = [
 binaries = []
 hiddenimports = []
 
+# These libraries use dynamic imports or package data at runtime.
 for package in (
     "webview",
     "fastapi",
@@ -36,7 +40,7 @@ for package in (
     binaries.extend(package_binaries)
     hiddenimports.extend(package_hiddenimports)
 
-# FFmpeg/ffprobe on macOS have no .exe extension
+# macOS FFmpeg binaries (no .exe extension)
 for executable in ("ffmpeg", "ffprobe"):
     executable_path = FFMPEG_DIR / executable
     if executable_path.is_file():
@@ -66,7 +70,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,
+    upx=True,
     console=False,
     icon=str(icon_path) if icon_path.is_file() else None,
 )
@@ -75,23 +79,7 @@ coll = COLLECT(
     analysis.binaries,
     analysis.datas,
     strip=False,
-    upx=False,
+    upx=True,
     upx_exclude=[],
     name="VideoDub",
-)
-
-# Build .app bundle structure for macOS
-app = BUNDLE(
-    coll,
-    name="VideoDub.app",
-    icon=str(icon_path) if icon_path.is_file() else None,
-    bundle_identifier="com.videodub.app",
-    info_plist={
-        "CFBundleName": "VideoDub",
-        "CFBundleDisplayName": "VideoDub",
-        "CFBundleShortVersionString": "1.0.0",
-        "CFBundleVersion": "1.0.0",
-        "NSHighResolutionCapable": True,
-        "LSMinimumSystemVersion": "12.0",
-    },
 )

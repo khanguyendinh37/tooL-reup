@@ -68,7 +68,7 @@ export interface WorkflowFormValues {
   subtitleEnabled: boolean
   subtitlePosition: string
   subtitlePositionY: number
-  subtitleSize: string
+  subtitleSize: number
   subtitleColor: string
   blurRegion: BlurRegion
   blurExistingSubtitles: boolean
@@ -125,7 +125,7 @@ export const DEFAULT_WORKFLOW_FORM: WorkflowFormValues = {
   subtitleEnabled: false,
   subtitlePosition: 'bottom',
   subtitlePositionY: subtitleYForPreset('bottom'),
-  subtitleSize: 'small',
+  subtitleSize: 13,
   subtitleColor: 'white',
   blurExistingSubtitles: false,
   blurRegion: DEFAULT_BLUR_REGION,
@@ -261,6 +261,7 @@ export function workflowFromJob(
       subtitlePosition: position,
       subtitlePositionY: positionY,
       subtitleColor: color,
+      subtitleSize: subtitleConfig?.font_size ? parseInt(subtitleConfig?.font_size, 10) : 13,
       blurExistingSubtitles: subtitleConfig?.blur_existing_subtitles,
       blurRegion: savedBlurRegion,
       dubbingVolume: processingConfig?.audio_config?.dubbing_volume,

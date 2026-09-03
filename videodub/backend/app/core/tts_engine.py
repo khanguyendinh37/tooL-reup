@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import asyncio
 import logging
@@ -51,9 +53,35 @@ EDGE_TTS_VOICES = {
     "ms": "ms-MY-YasminNeural",
 }
 
+# Canonical gender for every supported Edge TTS voice. This is the single
+# source of truth so a male selection never silently swaps in a female
+# voice when the primary provider is temporarily down.
+VOICE_GENDERS = {
+    "vi-VN-HoaiMyNeural": "female",
+    "vi-VN-NamMinhNeural": "male",
+    "en-US-JennyNeural": "female",
+    "en-US-GuyNeural": "male",
+    "ja-JP-NanamiNeural": "female",
+    "ja-JP-KeitaNeural": "male",
+    "ko-KR-SunHiNeural": "female",
+    "ko-KR-InJoonNeural": "male",
+    "zh-CN-XiaoxiaoNeural": "female",
+    "zh-CN-YunxiNeural": "male",
+    "th-TH-PremwadeeNeural": "female",
+    "fr-FR-DeniseNeural": "female",
+    "de-DE-KatjaNeural": "female",
+    "es-ES-ElviraNeural": "female",
+    "pt-BR-FranciscaNeural": "female",
+    "ru-RU-SvetlanaNeural": "female",
+    "ar-SA-ZariyahNeural": "female",
+    "hi-IN-SwaraNeural": "female",
+    "id-ID-GadisNeural": "female",
+    "ms-MY-YasminNeural": "female",
+}
+
 # Fallback voices per language (if primary fails)
 VOICE_FALLBACKS = {
-    "vi": ["vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"],
+    "vi": ["vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural", "en-US-GuyNeural"],
     "en": ["en-US-JennyNeural", "en-US-GuyNeural"],
     "ja": ["ja-JP-NanamiNeural", "ja-JP-KeitaNeural"],
     "ko": ["ko-KR-SunHiNeural", "ko-KR-InJoonNeural"],
@@ -80,13 +108,33 @@ def get_edge_voice(voice: str) -> str:
     return EDGE_TTS_VOICES.get(lang, "en-US-JennyNeural")
 
 
+def _voice_gender(voice_id: str) -> str:
+    """Return 'male' or 'female' for an Edge TTS voice id.
+
+    Uses the canonical ``VOICE_GENDERS`` table as the single source of truth.
+    Unknown voices default to 'female' so a male selection never silently
+    swaps in a female voice when the primary provider is temporarily down.
+    """
+    return VOICE_GENDERS.get(voice_id, "female")
+
+
 def get_fallback_voices(voice: str) -> list:
-    """Get list of fallback voices for a given voice."""
+    """Get list of fallback voices for a given voice.
+
+    Same-gender fallbacks are tried first so a male selection never silently
+    swaps in a female voice when the primary provider is temporarily down.
+    Returns an empty list when no same-gender fallback exists; the caller
+    should then fall back to the primary voice rather than a different gender.
+    """
     lang = voice.split("-")[0] if voice else "en"
     fallbacks = VOICE_FALLBACKS.get(lang, ["en-US-JennyNeural"])
-    # Remove the primary voice from fallbacks
     primary = get_edge_voice(voice)
-    return [v for v in fallbacks if v != primary]
+    primary_gender = _voice_gender(primary)
+
+    same_gender = [v for v in fallbacks if v != primary and _voice_gender(v) == primary_gender]
+    if same_gender:
+        return same_gender
+    return []
 
 
 def speed_to_rate(speed: float) -> str:
@@ -97,11 +145,57 @@ def speed_to_rate(speed: float) -> str:
     return f"{pct:+.0f}%"
 
 
+def _detect_text_language(text: str) -> str:
+    """Detect the language of text using Unicode character ranges.
+
+    Returns a 2-letter language code (e.g., 'vi', 'ja', 'zh', 'ko', 'th')
+    or '' if the language cannot be determined. This is used to validate that
+    an Edge TTS voice can actually pronounce the text correctly - an English
+    voice reading Vietnamese produces garbled output.
+    """
+    if not text:
+        return ""
+    sample = text[:200]
+    if any("一" <= char <= "鿿" for char in sample):
+        return "zh"
+    if any("぀" <= char <= "ゟ" or "゠" <= char <= "ヿ" for char in sample):
+        return "ja"
+    if any("가" <= char <= "힯" for char in sample):
+        return "ko"
+    if any("฀" <= char <= "๿" for char in sample):
+        return "th"
+    if any("Ѐ" <= char <= "ӿ" for char in sample):
+        return "ru"
+    if any("؀" <= char <= "ۿ" for char in sample):
+        return "ar"
+    if any("ऀ" <= char <= "ॿ" for char in sample):
+        return "hi"
+    if any("เ" <= char <= "๿" for char in sample):
+        return "th"
+    # Latin-based: check for Vietnamese diacritics first
+    if any(char in "àáảãạâầấẩẫậăằằằẵặèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụỳýỷỹỵđ" for char in sample.lower()):
+        return "vi"
+    return ""
+
+
 async def text_to_speech_edge(text: str, voice: str, output_path: str, rate: str = "+0%") -> str:
     """Generate TTS audio using Edge TTS (Microsoft Edge voices)."""
     edge_voice = get_edge_voice(voice)
     try:
         import edge_tts
+        # Validate the voice matches the language of the text. If the voice
+        # belongs to a different language family than the text, fall back to
+        # gTTS which actually pronounces the target language correctly.
+        text_lang = _detect_text_language(text)
+        voice_lang = edge_voice.split("-")[0] if edge_voice else ""
+        if text_lang and voice_lang and text_lang != voice_lang and text_lang != "auto":
+            # The voice may not pronounce this language correctly. gTTS
+            # fallback will speak the target language accurately.
+            logger.warning(
+                "Voice '%s' (%s) may not pronounce text in '%s' correctly; "
+                "gTTS fallback will speak the target language accurately",
+                edge_voice, voice_lang, text_lang,
+            )
         communicate = edge_tts.Communicate(text, edge_voice, rate=rate)
         await communicate.save(output_path)
         return output_path
@@ -128,8 +222,18 @@ async def text_to_speech_gtts(text: str, lang: str, output_path: str, slow: bool
         raise
 
 
-async def text_to_speech_with_fallback(text: str, voice: str, output_path: str, rate: str = "+0%") -> str:
-    """Try Edge TTS with fallbacks, then fall back to gTTS."""
+async def text_to_speech_with_fallback(text: str, voice: str, output_path: str, rate: str = "+0%", target_lang: str = "vi") -> str:
+    """Try Edge TTS with fallbacks, then fall back to gTTS.
+
+    Args:
+        text: Text to synthesize
+        voice: Voice ID (e.g., 'vi-VN-HoaiMyNeural', 'en-US-GuyNeural')
+        output_path: Output audio file path
+        rate: Speech rate (e.g., '+0%', '+20%')
+        target_lang: Target language code (e.g., 'vi', 'en', 'ja') - used for gTTS
+                     fallback to ensure correct language is spoken regardless of
+                     the voice parameter.
+    """
     # Try primary voice
     primary_voice = get_edge_voice(voice)
     try:
@@ -146,17 +250,16 @@ async def text_to_speech_with_fallback(text: str, voice: str, output_path: str, 
         except Exception as e:
             logger.warning(f"Fallback voice '{fb_voice}' failed: {e}")
 
-    # Try gTTS as last resort
-    lang = voice.split("-")[0] if voice else "en"
-    # Map language codes for gTTS
+    # Try gTTS as last resort - USE target_lang, not voice prefix
+    # Map language codes for gTTS (Google Translate TTS language codes)
     gtts_lang_map = {
         "vi": "vi", "en": "en", "ja": "ja", "ko": "ko", "zh": "zh-cn",
         "th": "th", "fr": "fr", "de": "de", "es": "es", "pt": "pt",
         "ru": "ru", "ar": "ar", "hi": "hi", "id": "id", "ms": "ms"
     }
-    gtts_lang = gtts_lang_map.get(lang, "en")
+    gtts_lang = gtts_lang_map.get(target_lang.lower(), "en")
     try:
-        logger.info(f"Falling back to gTTS with lang: {gtts_lang}")
+        logger.info(f"Falling back to gTTS with target_lang: {target_lang} -> gTTS lang: {gtts_lang}")
         return await text_to_speech_gtts(text, gtts_lang, output_path)
     except Exception as e:
         logger.error(f"All TTS methods failed: {e}")
@@ -164,9 +267,13 @@ async def text_to_speech_with_fallback(text: str, voice: str, output_path: str, 
 
 
 async def _generate_segment_audio(index: int, segment: dict, voice: str,
-                                  output_dir: str, rate: str,
+                                  output_dir: str, rate: str, target_lang: str,
                                   semaphore: asyncio.Semaphore) -> dict | None:
-    """Generate one segment while respecting the global TTS concurrency limit."""
+    """Generate one segment while respecting the global TTS concurrency limit.
+
+    target_lang is passed through so the gTTS fallback speaks the destination
+    language even if the user picked a voice whose prefix differs.
+    """
     text = segment.get("text", "").strip()
     if not text:
         return None
@@ -177,7 +284,7 @@ async def _generate_segment_audio(index: int, segment: dict, voice: str,
             # Use fallback chain: Edge TTS -> fallback voices -> gTTS. A
             # provider that hangs must not hold a job in TTS forever.
             await asyncio.wait_for(
-                text_to_speech_with_fallback(text, voice, segment_path, rate),
+                text_to_speech_with_fallback(text, voice, segment_path, rate, target_lang),
                 timeout=TTS_SEGMENT_TIMEOUT_SECONDS,
             )
             return {
@@ -212,12 +319,17 @@ def cleanup_tts_directory(output_dir: str) -> None:
 
 
 async def generate_dubbing_audio(segments: list, voice: str,
-                                 output_dir: str, rate: str = "+0%") -> list:
-    """Generate all TTS segments concurrently while preserving timeline order."""
+                                 output_dir: str, rate: str = "+0%",
+                                 target_lang: str = "vi") -> list:
+    """Generate all TTS segments concurrently while preserving timeline order.
+
+    target_lang is used for the gTTS fallback so the fallback voice speaks the
+    destination language instead of the voice's language prefix.
+    """
     os.makedirs(output_dir, exist_ok=True)
     semaphore = asyncio.Semaphore(TTS_CONCURRENCY)
     tasks = [
-        _generate_segment_audio(index, segment, voice, output_dir, rate, semaphore)
+        _generate_segment_audio(index, segment, voice, output_dir, rate, target_lang, semaphore)
         for index, segment in enumerate(segments)
         if segment.get("text", "").strip()
     ]

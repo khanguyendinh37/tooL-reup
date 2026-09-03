@@ -280,29 +280,29 @@ export default function Settings() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6 animate-fade-in">
-      <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-bold text-surface-100">Cài đặt</h2>
-        <div className="flex items-center gap-3">
-          <button onClick={handleReset} className="btn-secondary inline-flex items-center gap-2">
+    <div className="max-w-4xl mx-auto space-y-4 sm:space-y-6 animate-fade-in">
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-xl sm:text-2xl font-bold text-surface-100">Cài đặt</h2>
+        <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
+          <button onClick={handleReset} className="btn-secondary inline-flex items-center gap-2 text-sm sm:text-base">
             <RotateCcw className="w-4 h-4" />
-            Đặt lại
+            <span className="hidden sm:inline">Đặt lại</span>
           </button>
-          <button onClick={handleSave} disabled={saving} className="btn-primary inline-flex items-center gap-2 disabled:opacity-50">
+          <button onClick={handleSave} disabled={saving} className="btn-primary inline-flex items-center gap-2 disabled:opacity-50 text-sm sm:text-base">
             {saved ? (
               <>
                 <CheckCircle2 className="w-4 h-4" />
-                Đã lưu!
+                <span className="hidden sm:inline">Đã lưu!</span>
               </>
             ) : saving ? (
               <>
                 <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                Đang lưu...
+                <span className="hidden sm:inline">Đang lưu...</span>
               </>
             ) : (
               <>
                 <Save className="w-4 h-4" />
-                Lưu cài đặt
+                <span className="hidden sm:inline">Lưu cài đặt</span>
               </>
             )}
           </button>
@@ -324,7 +324,7 @@ export default function Settings() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {WHISPER_MODELS.map(model => (
             <button
               key={model.id}
@@ -473,7 +473,7 @@ export default function Settings() {
           </div>
         </div>
 
-        <div className="mt-6 grid grid-cols-1 gap-4 rounded-xl bg-surface-800/35 p-4 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-end md:gap-3">
+        <div className="mt-6 grid grid-cols-1 gap-3 sm:gap-4 rounded-xl bg-surface-800/35 p-3 sm:p-4 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:items-end md:gap-3">
           <div>
             <label htmlFor="default-source-language" className="mb-2 block text-sm text-surface-400">Ngôn ngữ nguồn mặc định</label>
             <select
@@ -602,7 +602,7 @@ export default function Settings() {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
           {[
             { name: 'faster-whisper', status: 'installed', version: 'v3.1.0' },
             { name: 'edge-tts', status: 'installed', version: 'v6.1.9' },
@@ -633,7 +633,7 @@ export default function Settings() {
         </div>
 
         {/* Platform Status */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4 sm:mb-6">
           {platforms.map((p) => (
             <div
               key={p.platform}

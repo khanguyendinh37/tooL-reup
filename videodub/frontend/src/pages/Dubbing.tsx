@@ -362,7 +362,7 @@ export default function Dubbing() {
           setSubtitlePositionY(Number.isFinite(savedPositionY)
             ? Math.min(Math.max(savedPositionY, 0), 1)
             : subtitleYForPreset(savedPosition))
-          setSubtitleSize(settings.subtitle_size || 'small')
+          setSubtitleSize(settings.subtitle_size ? parseInt(String(settings.subtitle_size), 10) : 13)
           setSubtitleColor(settings.subtitle_color || 'white')
           setBlurExistingSubtitles(
             settings.blur_existing_subtitles === 'true' || settings.blur_existing_subtitles === true
@@ -572,14 +572,14 @@ export default function Dubbing() {
   }
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6 animate-fade-in">
+    <div className="max-w-6xl mx-auto space-y-4 sm:space-y-6 animate-fade-in">
       {/* URL Input - Always visible */}
       <div className="glass-card">
-        <h3 className="text-lg font-semibold text-surface-100 mb-4 flex items-center gap-2">
+        <h3 className="text-base sm:text-lg font-semibold text-surface-100 mb-3 sm:mb-4 flex items-center gap-2">
           <Link className="w-5 h-5 text-primary-400" />
           Nhập link video
         </h3>
-        <div className="flex gap-3">
+        <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
           <input
             type="url"
             value={url}
@@ -588,62 +588,64 @@ export default function Dubbing() {
             className="glass-input flex-1"
             disabled={workflowPhase === 'downloading' || workflowPhase === 'processing'}
           />
-          {workflowPhase === 'idle' || workflowPhase === 'error' ? (
-            <button
-              onClick={handleDownloadPreview}
-              disabled={!url.trim()}
-              className="btn-primary inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <><Download className="w-5 h-5" /> Tải video</>
-            </button>
-          ) : workflowPhase === 'downloading' ? (
-            <>
-              <button disabled className="btn-primary inline-flex items-center gap-2 opacity-50">
-                <Loader2 className="w-5 h-5 animate-spin" /> Đang tải...
-              </button>
+          <div className="flex-shrink-0">
+            {workflowPhase === 'idle' || workflowPhase === 'error' ? (
               <button
-                onClick={handleStartNewDownload}
-                className="btn-secondary inline-flex items-center gap-2"
-                title="Tải video khác trong khi đang tải"
+                onClick={handleDownloadPreview}
+                disabled={!url.trim()}
+                className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Download className="w-5 h-5" /> Tải video khác
+                <><Download className="w-5 h-5" /> Tải video</>
               </button>
-            </>
-          ) : workflowPhase === 'processing' ? (
-            <>
-              <button disabled className="btn-primary inline-flex items-center gap-2 opacity-50">
+            ) : workflowPhase === 'downloading' ? (
+              <>
+                <button disabled className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2 opacity-50">
+                  <Loader2 className="w-5 h-5 animate-spin" /> Đang tải...
+                </button>
+                <button
+                  onClick={handleStartNewDownload}
+                  className="btn-secondary w-full sm:w-auto inline-flex items-center justify-center gap-2 mt-2 sm:mt-0"
+                  title="Tải video khác trong khi đang tải"
+                >
+                  <Download className="w-5 h-5" /> Tải video khác
+                </button>
+              </>
+            ) : workflowPhase === 'processing' ? (
+              <>
+                <button disabled className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2 opacity-50">
+                  <Loader2 className="w-5 h-5 animate-spin" /> Đang xử lý...
+                </button>
+                <button
+                  onClick={handleStartNewDownload}
+                  className="btn-secondary w-full sm:w-auto inline-flex items-center justify-center gap-2 mt-2 sm:mt-0"
+                  title="Tải video khác trong khi đang xử lý"
+                >
+                  <Download className="w-5 h-5" /> Tải video khác
+                </button>
+              </>
+            ) : workflowPhase === 'preview' ? (
+              <button
+                onClick={handleStartDubbing}
+                className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2"
+              >
+                <Play className="w-5 h-5" /> Bắt đầu lồng tiếng
+              </button>
+            ) : workflowPhase === 'processing' ? (
+              <button disabled className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2 opacity-50">
                 <Loader2 className="w-5 h-5 animate-spin" /> Đang xử lý...
               </button>
-              <button
-                onClick={handleStartNewDownload}
-                className="btn-secondary inline-flex items-center gap-2"
-                title="Tải video khác trong khi đang xử lý"
-              >
-                <Download className="w-5 h-5" /> Tải video khác
+            ) : workflowPhase === 'completed' ? (
+              <button onClick={handleReset} className="btn-secondary w-full sm:w-auto inline-flex items-center justify-center gap-2">
+                <RotateCcw className="w-5 h-5" /> Video mới
               </button>
-            </>
-          ) : workflowPhase === 'preview' ? (
-            <button
-              onClick={handleStartDubbing}
-              className="btn-primary inline-flex items-center gap-2"
-            >
-              <Play className="w-5 h-5" /> Bắt đầu lồng tiếng
-            </button>
-          ) : workflowPhase === 'processing' ? (
-            <button disabled className="btn-primary inline-flex items-center gap-2 opacity-50">
-              <Loader2 className="w-5 h-5 animate-spin" /> Đang xử lý...
-            </button>
-          ) : workflowPhase === 'completed' ? (
-            <button onClick={handleReset} className="btn-secondary inline-flex items-center gap-2">
-              <RotateCcw className="w-5 h-5" /> Video mới
-            </button>
-          ) : null}
+            ) : null}
+          </div>
         </div>
       </div>
 
       {/* Language & Voice Selection - visible in idle, preview, and error phases */}
       {(workflowPhase === 'idle' || workflowPhase === 'preview' || workflowPhase === 'error') && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
           <div className="glass-card">
             <label className="text-sm text-surface-400 mb-2 block">Ngôn ngữ gốc</label>
             <select value={sourceLang} onChange={(e) => setSourceLang(e.target.value)} className="glass-input w-full appearance-none cursor-pointer">
@@ -669,8 +671,8 @@ export default function Dubbing() {
       {/* Subtitle Editor - visible in preview phase */}
       {workflowPhase === 'preview' && (
         <div className="glass-card">
-          <div className="flex items-center justify-between w-full">
-            <div className="flex items-center gap-3 flex-1">
+          <div className="flex items-center justify-between w-full gap-2 flex-wrap">
+            <div className="flex items-center gap-3 flex-1 min-w-0 flex-wrap">
               <FileText className="w-5 h-5 text-primary-400" />
               <span className="text-surface-300">Cài đặt phụ đề</span>
               <label className="flex items-center gap-2 cursor-pointer ml-4">
@@ -697,9 +699,19 @@ export default function Dubbing() {
           </div>
           {subtitleEnabled && (
             <div className="mt-4 pt-4 border-t border-surface-700/50 space-y-3">
-              <p className="text-sm text-surface-400">
-                Cỡ chữ phụ đề: <span className="text-surface-200 font-medium">13 px</span>
-              </p>
+              <div className="flex items-center gap-3">
+                <label htmlFor="subtitle-size" className="text-sm text-surface-400">Cỡ chữ phụ đề:</label>
+                <input
+                  id="subtitle-size"
+                  type="range"
+                  min={10}
+                  max={40}
+                  value={subtitleSize}
+                  onChange={(e) => setSubtitleSize(parseInt(e.target.value, 10))}
+                  className="w-32 accent-primary-500"
+                />
+                <span className="text-surface-200 font-medium">{subtitleSize} px</span>
+              </div>
               <label htmlFor="blur-existing-subtitles" className="flex items-start gap-3 cursor-pointer">
                 <input
                   id="blur-existing-subtitles"
@@ -752,7 +764,7 @@ export default function Dubbing() {
             <ChevronDown className={`w-5 h-5 text-surface-500 transition-transform ${showAdvanced ? 'rotate-180' : ''}`} />
           </button>
           {showAdvanced && (
-            <div className="mt-4 pt-4 border-t border-surface-700/50 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="mt-4 pt-4 border-t border-surface-700/50 grid grid-cols-1 md:grid-cols-2 gap-3 sm:gap-4">
               {/* Volume sliders */}
               <div className="md:col-span-2">
                 <label className="text-sm text-surface-400 mb-3 block">Audio Mix Controls</label>
@@ -840,11 +852,11 @@ export default function Dubbing() {
               <span className="text-sm text-surface-400 flex items-center gap-2">
                 <Video className="w-4 h-4" /> Xem trước kết quả
               </span>
-              <div className="flex gap-2">
-                <button onClick={handleDownloadOriginal} className="btn-primary inline-flex items-center gap-2 text-sm px-4 py-2">
+              <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+                <button onClick={handleDownloadOriginal} className="btn-primary inline-flex items-center justify-center gap-2 text-sm px-4 py-2">
                   <Download className="w-4 h-4" /> Tải video gốc
                 </button>
-                <button onClick={handleDownload} className="btn-primary inline-flex items-center gap-2 text-sm px-4 py-2">
+                <button onClick={handleDownload} className="btn-primary inline-flex items-center justify-center gap-2 text-sm px-4 py-2">
                   <Download className="w-4 h-4" /> Tải video lồng tiếng
                 </button>
               </div>
@@ -855,7 +867,7 @@ export default function Dubbing() {
               <span className="text-sm text-surface-400 flex items-center gap-2">
                 <Video className="w-4 h-4" /> Video gốc
               </span>
-              <button onClick={handleDownloadOriginal} className="btn-primary inline-flex items-center gap-2 text-sm px-4 py-2">
+              <button onClick={handleDownloadOriginal} className="btn-primary inline-flex items-center justify-center gap-2 text-sm px-4 py-2 w-full sm:w-auto">
                 <Download className="w-4 h-4" /> Tải video gốc
               </button>
             </div>
@@ -898,11 +910,11 @@ export default function Dubbing() {
               {cancelPending ? 'Đang hủy...' : 'Hủy lồng tiếng'}
             </button>
           </div>
-          <div className="space-y-4">
+          <div className="space-y-3 sm:space-y-4">
             {steps.map((step) => {
               const Icon = step.icon
               return (
-                <div key={step.id} className="flex items-center gap-4">
+                <div key={step.id} className="flex items-center gap-3 sm:gap-4">
                   <div className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all ${
                     step.status === 'completed' ? 'bg-emerald-500/20 text-emerald-400'
                     : step.status === 'active' ? 'bg-primary-500/20 text-primary-400 animate-pulse'

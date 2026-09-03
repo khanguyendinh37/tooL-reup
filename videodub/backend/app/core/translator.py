@@ -50,6 +50,74 @@ def _marker(index: int) -> str:
     return MARKER_TEMPLATE.format(index)
 
 
+# Per-cue target length for the translated text. The aim is one line on a
+# vertical short-form video so the subtitle never overflows or covers the
+# visual. Translators are told to keep the text within this range; when a
+# cue arrives longer than ``MAX_CUE_CHARS`` we still write it (so a
+# faithful translation is never dropped), but the renderer is told to use
+# the smaller font for those cues.
+TARGET_CUE_CHARS = 28
+MAX_CUE_CHARS = 40
+
+
+def _is_chinese_lang(lang: Optional[str]) -> bool:
+    if not lang:
+        return False
+    return lang.lower().startswith("zh")
+
+
+def _compress_too_long_cue(text: str, target_lang: Optional[str] = None) -> str:
+    """Best-effort: shorten an AI translation that still exceeded the per-cue
+    character budget. We drop filler words first; if still too long, we cut at
+    the nearest clause boundary (comma, period, conjunction) so the rendered
+    line stays readable and never ends mid-word.
+
+    For Chinese, each character counts as one visual unit, so the limits
+    translate directly. For other languages, the AI prompt keeps text within
+    the budget and this function is just a safety net.
+    """
+    if not text or len(text) <= MAX_CUE_CHARS:
+        return text
+
+    drop_patterns = [
+        r"\b(thật ra|thực ra|nói chung|nói thật|cơ bản|căn bản)\b\s*",
+        r"\b(rất|quá|cực kỳ|cực)\s+",
+        r"\b(literally|basically|honestly|actually|seriously|kind of|sort of|just|really|very)\s+",
+        r"\b(um+|uh+|er+|ah+|hmm+)\b,?\s*",
+        r"\s*[,…]+\s*",
+    ]
+    compressed = text
+    for pattern in drop_patterns:
+        new = re.sub(pattern, " ", compressed, flags=re.IGNORECASE).strip()
+        if len(new) <= MAX_CUE_CHARS:
+            return " ".join(new.split())
+        compressed = new
+
+    if len(compressed) > MAX_CUE_CHARS:
+        # Cut at the nearest clause boundary, allowing a small overshoot past
+        # MAX_CUE_CHARS so a comma sitting just past the limit is still used
+        # as the cut point instead of splitting a word. Boundaries are:
+        # comma, period, Vietnamese conjunctions (và, nhưng, hay, hoặc, vì,
+        # do), or a space.
+        search_end = min(len(compressed), MAX_CUE_CHARS + 6)
+        boundary = max(
+            compressed.rfind(",", 0, search_end),
+            compressed.rfind(".", 0, search_end),
+            compressed.rfind(" và ", 0, search_end),
+            compressed.rfind(" nhưng ", 0, search_end),
+            compressed.rfind(" hay ", 0, search_end),
+            compressed.rfind(" hoặc ", 0, search_end),
+            compressed.rfind(" vì ", 0, search_end),
+            compressed.rfind(" do ", 0, search_end),
+            compressed.rfind(" ", 0, search_end),
+        )
+        if boundary > MAX_CUE_CHARS * 0.5:
+            compressed = compressed[:boundary].rstrip(" ,.;:-")
+        else:
+            compressed = compressed[:MAX_CUE_CHARS].rstrip()
+    return " ".join(compressed.split())
+
+
 def _clean_subtitle_text(text: str) -> str:
     """Flatten an SRT cue to one readable line for translation/TTS."""
     return " ".join(str(text or "").replace("\r", " ").replace("\n", " ").split())
@@ -233,7 +301,7 @@ def _mymemory_translate_text(
         translated = html.unescape(str(translated or "")).strip()
         if not translated or translated.casefold() == source_text.casefold():
             return None
-        return translated
+        return _compress_too_long_cue(translated, dest)
     except HTTPError as exc:
         logger.warning("Public translation fallback returned HTTP %s", exc.code)
     except (URLError, TimeoutError, OSError, json.JSONDecodeError, AttributeError):
@@ -333,14 +401,19 @@ def _translate_whole_file_with_ai(
         target,
         timeout_seconds=_full_pass_timeout_seconds(len(translatable_indices)),
     )
-    translations = _extract_marked_translations(result or "", translatable_indices)
+    translations = _extract_marked_translations(result or "", translatable_indices, target_lang=target)
     if not translations or not _translations_are_meaningful(entries, translations):
         return None
     return translations
 
 
-def _extract_marked_translations(result: str, indices: Iterable[int]) -> Optional[dict[int, str]]:
-    """Return translations only when every requested marker is preserved exactly once."""
+def _extract_marked_translations(result: str, indices: Iterable[int], target_lang: Optional[str] = None) -> Optional[dict[int, str]]:
+    """Return translations only when every requested marker is preserved exactly once.
+
+    Each translated cue is also passed through ``_compress_too_long_cue`` so
+    the rendered subtitle stays inside the per-cue character budget the AI
+    prompt told the model to respect.
+    """
     if not result:
         return None
 
@@ -360,6 +433,7 @@ def _extract_marked_translations(result: str, indices: Iterable[int]) -> Optiona
         translated = _clean_subtitle_text(result[content_start:content_end])
         if not translated or MARKER_RE.search(translated):
             return None
+        translated = _compress_too_long_cue(translated, target_lang)
         index = requested[markers.index(marker)]
         translations[index] = translated
 
@@ -477,7 +551,7 @@ def _translate_marked_group(
             dest,
             timeout_seconds=GROUP_AI_TIMEOUT_SECONDS,
         )
-        ai_translations = _extract_marked_translations(ai_result or "", indices)
+        ai_translations = _extract_marked_translations(ai_result or "", indices, target_lang=dest)
         if ai_translations and _translations_are_meaningful(entries, ai_translations):
             return ai_translations
         logger.warning(
@@ -486,7 +560,7 @@ def _translate_marked_group(
         )
 
     result = _translate_with_retry(block, src, dest, max_retries=max_retries)
-    translations = _extract_marked_translations(result, indices) if result else None
+    translations = _extract_marked_translations(result, indices, target_lang=dest) if result else None
     if translations and _translations_are_meaningful(entries, translations):
         return translations
 

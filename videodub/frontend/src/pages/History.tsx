@@ -267,9 +267,9 @@ export default function History() {
   return (
     <div className="max-w-6xl mx-auto space-y-6 animate-fade-in">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-bold text-surface-100">Lịch sử lồng tiếng</h2>
-        <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-xl sm:text-2xl font-bold text-surface-100 truncate">Lịch sử lồng tiếng</h2>
+        <div className="flex items-center gap-1 sm:gap-2 flex-shrink-0">
           <button
             onClick={toggleSelectAll}
             className="p-2 rounded-lg transition-colors text-surface-500 hover:bg-surface-800"
@@ -293,8 +293,8 @@ export default function History() {
       </div>
 
       {/* Filters */}
-      <div className="flex items-center gap-4">
-        <div className="relative flex-1">
+      <div className="flex flex-col sm:flex-row items-stretch gap-3">
+        <div className="relative flex-1 sm:flex-shrink-0">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-surface-500" />
           <input
             type="text"
@@ -307,7 +307,7 @@ export default function History() {
         <select
           value={filterStatus}
           onChange={(e) => setFilterStatus(e.target.value)}
-          className="glass-input appearance-none cursor-pointer"
+          className="glass-input appearance-none cursor-pointer sm:w-40"
         >
           <option value="all">Tất cả</option>
           <option value="completed">Hoàn thành</option>
@@ -343,17 +343,17 @@ export default function History() {
 
       {/* Grid View */}
       {viewMode === 'grid' ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
           {filteredData.map((item) => (
             <div key={item.id} className="glass-card hover:scale-[1.02] transition-all duration-300">
               {/* Thumbnail / Video Player */}
               <div className="aspect-video bg-surface-800 rounded-xl mb-4 flex items-center justify-center relative overflow-hidden group">
-                <div className="flex items-center justify-center gap-1.5 absolute top-2 left-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="flex items-center justify-center gap-1.5 absolute top-2 left-2 opacity-0 group-hover:opacity-100 transition-opacity z-10">
                   <input
                     type="checkbox"
                     checked={selectedIds.has(item.id)}
                     onChange={() => toggleSelect(item.id)}
-                    className="w-3 h-3 rounded border border-surface-400 cursor-pointer"
+                    className="w-3 h-3 rounded border border-surface-400 cursor-pointer bg-surface-900/80"
                   />
                 </div>
                 {playingId === item.id ? (
@@ -397,7 +397,7 @@ export default function History() {
                 )}
               </div>
 
-              <h3 className="font-medium text-surface-100 mb-2 line-clamp-2">
+              <h3 className="font-medium text-surface-100 mb-2 line-clamp-2 text-sm sm:text-base">
                 {item.title || 'Video không có tiêu đề'}
               </h3>
 
@@ -482,7 +482,7 @@ export default function History() {
         /* List View */
         <div className="space-y-2">
           {filteredData.map((item) => (
-            <div key={item.id} className="glass-card !p-4 flex items-center gap-4 hover:bg-surface-800/30 transition-colors">
+            <div key={item.id} className="glass-card !p-3 sm:!p-4 flex items-center gap-3 sm:gap-4 hover:bg-surface-800/30 transition-colors">
               <input
                 type="checkbox"
                 checked={selectedIds.has(item.id)}
@@ -490,7 +490,7 @@ export default function History() {
                 className="w-4 h-4 rounded border border-surface-500 cursor-pointer flex-shrink-0"
               />
               <div
-                className="w-24 h-14 bg-surface-800 rounded-lg flex items-center justify-center flex-shrink-0 relative overflow-hidden cursor-pointer"
+                className="w-20 h-12 sm:w-24 sm:h-14 bg-surface-800 rounded-lg flex items-center justify-center flex-shrink-0 relative overflow-hidden cursor-pointer"
                 onClick={() => handlePlayToggle(item)}
               >
                 {playingId === item.id ? (
@@ -514,19 +514,19 @@ export default function History() {
               </div>
 
               <div className="flex-1 min-w-0">
-                <h3 className="font-medium text-surface-100 truncate">
+                <h3 className="font-medium text-surface-100 truncate text-sm sm:text-base">
                   {item.title || 'Video không có tiêu đề'}
                 </h3>
-                <div className="flex items-center gap-3 text-xs text-surface-500 mt-1">
-                  <span>{item.source_lang?.toUpperCase()} → {item.target_lang?.toUpperCase()}</span>
-                  {item.file_size && <span>{item.file_size}</span>}
-                  <span>{formatDate(item.created_at)}</span>
+                <div className="flex items-center gap-2 sm:gap-3 text-xs text-surface-500 mt-1 flex-wrap">
+                  <span className="whitespace-nowrap">{item.source_lang?.toUpperCase()} → {item.target_lang?.toUpperCase()}</span>
+                  {item.file_size && <span className="whitespace-nowrap">{item.file_size}</span>}
+                  <span className="whitespace-nowrap hidden sm:inline">{formatDate(item.created_at)}</span>
                 </div>
               </div>
 
-              {getStatusBadge(item.status)}
+              <div className="hidden sm:block flex-shrink-0">{getStatusBadge(item.status)}</div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1 sm:gap-2 flex-shrink-0">
                 {item.status === 'completed' && (
                   <>
                     <button

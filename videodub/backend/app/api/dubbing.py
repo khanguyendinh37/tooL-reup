@@ -90,11 +90,21 @@ def _map_subtitle_config(frontend_cfg: Optional[dict]) -> Optional[dict]:
     if isinstance(blur_existing, str):
         blur_existing = blur_existing.lower() in {"1", "true", "yes", "on"}
 
+    # Font size is a numeric pixel value (10-40). Old presets "small"/"medium"/
+    # "large" map to defaults; anything else falls back to 13.
+    raw_size = frontend_cfg.get("size")
+    if isinstance(raw_size, str) and raw_size.lower() in {"small", "medium", "large"}:
+        font_size = {"small": 13, "medium": 18, "large": 24}[raw_size.lower()]
+    else:
+        try:
+            font_size = max(10, min(40, int(raw_size)))
+        except (TypeError, ValueError):
+            font_size = 13
+
     return {
         "enabled": True,
         "position": position,
-        # Keep the rendered subtitle deliberately compact as requested.
-        "font_size": 13,
+        "font_size": font_size,
         "font_color": color_map.get(color, color_map["white"]),
         "outline_color": "#000000",
         "outline_width": 1,

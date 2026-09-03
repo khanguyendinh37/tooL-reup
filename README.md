@@ -10,10 +10,10 @@ VideoDub là công cụ lồng tiếng video tự động sử dụng AI: tải 
 
 | Tính năng | Công nghệ | Chi tiết |
 |-----------|-----------|----------|
-| **Tải video** | yt-dlp | YouTube, TikTok, Facebook, Twitter, Instagram + 1000+ trang |
+| **Tải video** | yt-dlp | YouTube, TikTok, Facebook, Instagram, Twitter, Bilibili, Douyin, Xiaohongshu, Vimeo, Twitch |
 | **Nhận diện giọng nói** | faster-whisper | 99+ ngôn ngữ, chạy local, miễn phí |
 | **Dịch thuật** | Google Translate (mặc định) + AI tùy chọn | OpenAI, OpenRouter, NVIDIA NIM, Gemini, Anthropic, endpoint OpenAI-compatible |
-| **Text-to-Speech** | Edge TTS + gTTS fallback | 300+ giọng, miễn phí |
+| **Text-to-Speech** | Edge TTS + gTTS fallback | 20+ giọng, miễn phí |
 | **Tách vocals** | Demucs | Chạy local, miễn phí |
 | **Xử lý video** | FFmpeg | Ghép video, burn subtitle, blur vùng phụ đề gốc |
 | **Quản lý lịch sử** | SQLite | Xem lại, tải lại, xóa hàng loạt |

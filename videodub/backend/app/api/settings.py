@@ -81,7 +81,7 @@ DEFAULT_SETTINGS = {
     "subtitle_enabled": "false",
     "subtitle_position": "bottom",
     "subtitle_position_y": str(DEFAULT_SUBTITLE_POSITION_Y),
-    "subtitle_size": "small",
+    "subtitle_size": "13",
     "subtitle_color": "white",
     "blur_existing_subtitles": "false",
     "translation_provider": DEFAULT_TRANSLATION_PROVIDER,
@@ -93,6 +93,12 @@ DEFAULT_SETTINGS = {
     "translation_api_key": "",
 }
 
+# Subtitle font size is stored as a pixel value. Old presets saved the
+# string keys "small"/"medium"/"large"; those map to these defaults.
+SUBTITLE_SIZE_PRESETS = {"small": 13, "medium": 18, "large": 24}
+SUBTITLE_SIZE_MIN = 10
+SUBTITLE_SIZE_MAX = 40
+
 # Preset keys in database
 PRESET_KEY_PREFIX = "user_preset_"
 
@@ -102,7 +108,7 @@ def _parse_subtitle_config(config_str: str) -> Dict[str, Any]:
     defaults = {
         "position": "bottom",
         "position_y": DEFAULT_SUBTITLE_POSITION_Y,
-        "size": "small",
+        "size": "13",
         "color": "white",
         "blur_existing_subtitles": False,
         "blur_region": dict(DEFAULT_BLUR_REGION),
@@ -117,8 +123,16 @@ def _parse_subtitle_config(config_str: str) -> Dict[str, Any]:
         if not isinstance(config, dict):
             return defaults
 
-        # Subtitle rendering uses a fixed compact 13px size.
-        size = "small"
+        # Subtitle font size is stored as a pixel value. Old presets saved the
+        # string keys "small"/"medium"/"large"; map those to pixel defaults.
+        raw_size = config.get("size", config.get("font_size"))
+        if isinstance(raw_size, str):
+            size = str(SUBTITLE_SIZE_PRESETS.get(raw_size.lower(), 13))
+        elif isinstance(raw_size, (int, float)):
+            size = str(int(max(SUBTITLE_SIZE_MIN, min(SUBTITLE_SIZE_MAX, int(raw_size)))))
+        else:
+            size = "13"
+
         position = str(config.get("position") or "bottom")
 
         # Map font_color to color name. Accept the older color-name field too.
@@ -161,7 +175,15 @@ def _build_subtitle_config(
     blur_region: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Build subtitle settings while preserving the editor's custom geometry."""
-    size_map = {"small": 13, "medium": 13, "large": 13}
+    # Font size is stored as a numeric pixel value. Old presets map to defaults.
+    if isinstance(size, str) and size.lower() in SUBTITLE_SIZE_PRESETS:
+        font_size = SUBTITLE_SIZE_PRESETS[size.lower()]
+    else:
+        try:
+            font_size = int(size)
+            font_size = max(SUBTITLE_SIZE_MIN, min(SUBTITLE_SIZE_MAX, font_size))
+        except (TypeError, ValueError):
+            font_size = 13
     color_map = {
         "white": "#FFFFFF",
         "yellow": "#FFD700",
@@ -178,7 +200,7 @@ def _build_subtitle_config(
     config = {
         "enabled": True,
         "font_family": "Arial",
-        "font_size": size_map.get(size, 13),
+        "font_size": font_size,
         "font_color": color_map.get(color, "#FFFFFF"),
         "outline_color": "#000000",
         "outline_width": 2,

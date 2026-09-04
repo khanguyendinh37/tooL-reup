@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom'
-import { Home, Mic2, History, Settings, X } from 'lucide-react'
+import { Home, Mic2, History, Settings, X, BookOpen } from 'lucide-react'
 import BrandMark from '@/components/brand/BrandMark'
 import { cn } from '@/lib/utils'
 
@@ -8,6 +8,7 @@ const navItems = [
   { to: '/dubbing', icon: Mic2, label: 'Lồng tiếng' },
   { to: '/history', icon: History, label: 'Lịch sử' },
   { to: '/settings', icon: Settings, label: 'Cài đặt' },
+  { to: '/docs', icon: BookOpen, label: 'Hướng dẫn' },
 ]
 
 interface SidebarProps {

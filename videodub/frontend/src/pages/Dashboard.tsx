@@ -19,7 +19,7 @@ const features = [
   {
     icon: Volume2,
     title: 'Lồng tiếng',
-    description: 'Tạo giọng nói tự nhiên với 20+ giọng đa ngôn ngữ qua Edge TTS',
+    description: 'Tạo giọng nói tự nhiên với 76+ giọng đa ngôn ngữ qua Edge TTS',
     color: 'from-emerald-500 to-teal-500',
   },
   {
@@ -32,8 +32,8 @@ const features = [
 
 const stats = [
   { label: 'Nền tảng hỗ trợ', value: '10', icon: Globe },
-  { label: 'Ngôn ngữ', value: '16', icon: Languages },
-  { label: 'Giọng TTS', value: '20+', icon: Volume2 },
+  { label: 'Ngôn ngữ', value: '20', icon: Languages },
+  { label: 'Giọng TTS', value: '76+', icon: Volume2 },
   { label: 'Hoàn toàn miễn phí', value: '100%', icon: Zap },
 ]
 

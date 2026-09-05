@@ -5,8 +5,12 @@ import Dubbing from './pages/Dubbing'
 import History from './pages/History'
 import Settings from './pages/Settings'
 import Documentation from './pages/Documentation'
+import { useSyncSettings } from './hooks/useSyncSettings'
 
 function App() {
+  // Hydrate dubbingPreferences from the backend on every app load so the
+  // Dubbing page reflects whatever the user last saved on the Settings page.
+  useSyncSettings()
   return (
     <Routes>
       <Route path="/" element={<Layout />}>

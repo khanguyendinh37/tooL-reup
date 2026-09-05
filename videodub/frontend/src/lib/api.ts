@@ -303,3 +303,38 @@ export async function deleteCookies(platform: string) {
   if (!res.ok) throw new Error('Failed to delete cookies')
   return res.json()
 }
+
+/** Ask the backend to synthesize a short sample for a TTS voice.
+
+The backend calls Edge TTS with a demo sentence in the target language
+and returns the MP3 bytes. We use ``URL.createObjectURL`` to turn the
+blob into a URL the ``<audio>`` element can play without a second
+network round-trip. The caller is responsible for ``revokeObjectURL``
+when the audio element is done.
+*/
+export async function previewTtsVoice(params: {
+  voice: string
+  text?: string
+  lang?: string
+  rate?: string
+}): Promise<string> {
+  const res = await fetch(`${API_BASE}/tts/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    // Surface the backend's friendly detail when available so the UI
+    // can show "Edge TTS is busy" rather than a generic "fetch failed".
+    let message = `TTS preview failed (${res.status})`
+    try {
+      const payload = await res.json()
+      if (payload?.detail) message = String(payload.detail)
+    } catch {
+      // Body wasn't JSON; keep the default message.
+    }
+    throw new Error(message)
+  }
+  const blob = await res.blob()
+  return URL.createObjectURL(blob)
+}

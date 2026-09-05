@@ -7,6 +7,7 @@ import {
 } from 'lucide-react'
 import { LANGUAGES, TTS_VOICES, WHISPER_MODELS } from '@/lib/utils'
 import { downloadFile, startPreview, startDubbing, getDubbingStatus, getSettings, updateSettings, cancelDubbing } from '@/lib/api'
+import { VoicePreviewButton } from '@/components/VoicePreviewButton'
 import {
   DEFAULT_BLUR_REGION,
   DEFAULT_WORKFLOW_FORM,
@@ -588,55 +589,55 @@ export default function Dubbing() {
             className="glass-input flex-1"
             disabled={workflowPhase === 'downloading' || workflowPhase === 'processing'}
           />
-          <div className="flex-shrink-0">
+          <div className="w-full sm:w-auto sm:flex-shrink-0">
             {workflowPhase === 'idle' || workflowPhase === 'error' ? (
               <button
                 onClick={handleDownloadPreview}
                 disabled={!url.trim()}
-                className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
               >
-                <><Download className="w-5 h-5" /> Tải video</>
+                <Download className="w-4 h-4 sm:w-5 sm:h-5" /> Tải video
               </button>
             ) : workflowPhase === 'downloading' ? (
-              <>
-                <button disabled className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2 opacity-50">
-                  <Loader2 className="w-5 h-5 animate-spin" /> Đang tải...
+              <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
+                <button disabled className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2 opacity-50 whitespace-nowrap">
+                  <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" /> Đang tải...
                 </button>
                 <button
                   onClick={handleStartNewDownload}
-                  className="btn-secondary w-full sm:w-auto inline-flex items-center justify-center gap-2 mt-2 sm:mt-0"
+                  className="btn-secondary w-full sm:w-auto inline-flex items-center justify-center gap-2 whitespace-nowrap"
                   title="Tải video khác trong khi đang tải"
                 >
-                  <Download className="w-5 h-5" /> Tải video khác
+                  <Download className="w-4 h-4 sm:w-5 sm:h-5" /> Tải video khác
                 </button>
-              </>
+              </div>
             ) : workflowPhase === 'processing' ? (
-              <>
-                <button disabled className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2 opacity-50">
-                  <Loader2 className="w-5 h-5 animate-spin" /> Đang xử lý...
+              <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
+                <button disabled className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2 opacity-50 whitespace-nowrap">
+                  <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" /> Đang xử lý...
                 </button>
                 <button
                   onClick={handleStartNewDownload}
-                  className="btn-secondary w-full sm:w-auto inline-flex items-center justify-center gap-2 mt-2 sm:mt-0"
+                  className="btn-secondary w-full sm:w-auto inline-flex items-center justify-center gap-2 whitespace-nowrap"
                   title="Tải video khác trong khi đang xử lý"
                 >
-                  <Download className="w-5 h-5" /> Tải video khác
+                  <Download className="w-4 h-4 sm:w-5 sm:h-5" /> Tải video khác
                 </button>
-              </>
+              </div>
             ) : workflowPhase === 'preview' ? (
               <button
                 onClick={handleStartDubbing}
-                className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2"
+                className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2 whitespace-nowrap"
               >
-                <Play className="w-5 h-5" /> Bắt đầu lồng tiếng
+                <Play className="w-4 h-4 sm:w-5 sm:h-5" /> Bắt đầu lồng tiếng
               </button>
             ) : workflowPhase === 'processing' ? (
-              <button disabled className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2 opacity-50">
-                <Loader2 className="w-5 h-5 animate-spin" /> Đang xử lý...
+              <button disabled className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2 opacity-50 whitespace-nowrap">
+                <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" /> Đang xử lý...
               </button>
             ) : workflowPhase === 'completed' ? (
-              <button onClick={handleReset} className="btn-secondary w-full sm:w-auto inline-flex items-center justify-center gap-2">
-                <RotateCcw className="w-5 h-5" /> Video mới
+              <button onClick={handleReset} className="btn-secondary w-full sm:w-auto inline-flex items-center justify-center gap-2 whitespace-nowrap">
+                <RotateCcw className="w-4 h-4 sm:w-5 sm:h-5" /> Video mới
               </button>
             ) : null}
           </div>
@@ -660,10 +661,26 @@ export default function Dubbing() {
           </div>
           <div className="glass-card">
             <label className="text-sm text-surface-400 mb-2 block">Giọng lồng tiếng</label>
-            <select value={selectedVoice} onChange={(e) => setSelectedVoice(e.target.value)} className="glass-input w-full appearance-none cursor-pointer">
-              {filteredVoices.map(voice => <option key={voice.id} value={voice.id}>{voice.name} ({voice.gender === 'female' ? 'Nữ' : 'Nam'})</option>)}
-              {filteredVoices.length === 0 && <option value="">Không có giọng cho ngôn ngữ này</option>}
-            </select>
+            <div className="flex gap-2">
+              <select value={selectedVoice} onChange={(e) => setSelectedVoice(e.target.value)} className="glass-input flex-1 appearance-none cursor-pointer">
+                {filteredVoices.length > 0 && (
+                  <>
+                    <optgroup label="Nữ">
+                      {filteredVoices.filter(v => v.gender === 'female').map(voice => (
+                        <option key={voice.id} value={voice.id}>{voice.name}</option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="Nam">
+                      {filteredVoices.filter(v => v.gender === 'male').map(voice => (
+                        <option key={voice.id} value={voice.id}>{voice.name}</option>
+                      ))}
+                    </optgroup>
+                  </>
+                )}
+                {filteredVoices.length === 0 && <option value="">Không có giọng cho ngôn ngữ này</option>}
+              </select>
+              <VoicePreviewButton voice={selectedVoice} lang={targetLang} />
+            </div>
           </div>
         </div>
       )}
@@ -774,21 +791,21 @@ export default function Dubbing() {
                       <span className="text-xs text-surface-500">Dubbing Volume</span>
                       <span className="text-xs text-surface-500">{dubbingVolume.toFixed(1)}</span>
                     </div>
-                    <input type="range" min="0.5" max="3.0" step="0.1" value={dubbingVolume} onChange={(e) => setDubbingVolume(parseFloat(e.target.value))} className="w-full accent-primary-500" />
+                    <input type="range" min="0.5" max="2.0" step="0.1" value={dubbingVolume} onChange={(e) => setDubbingVolume(parseFloat(e.target.value))} className="w-full accent-primary-500" />
                   </div>
                   <div>
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-xs text-surface-500">Background Volume</span>
                       <span className="text-xs text-surface-500">{backgroundVolume.toFixed(1)}</span>
                     </div>
-                    <input type="range" min="0.5" max="3.0" step="0.1" value={backgroundVolume} onChange={(e) => setBackgroundVolume(parseFloat(e.target.value))} className="w-full accent-primary-500" />
+                    <input type="range" min="0.5" max="2.0" step="0.1" value={backgroundVolume} onChange={(e) => setBackgroundVolume(parseFloat(e.target.value))} className="w-full accent-primary-500" />
                   </div>
                   <div>
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-xs text-surface-500">Original Vocals Volume</span>
                       <span className="text-xs text-surface-500">{originalVocalsVolume.toFixed(2)}</span>
                     </div>
-                    <input type="range" min="0" max="1.0" step="0.05" value={originalVocalsVolume} onChange={(e) => setOriginalVocalsVolume(parseFloat(e.target.value))} className="w-full accent-primary-500" />
+                    <input type="range" min="0" max="0.5" step="0.01" value={originalVocalsVolume} onChange={(e) => setOriginalVocalsVolume(parseFloat(e.target.value))} className="w-full accent-primary-500" />
                   </div>
                 </div>
               </div>

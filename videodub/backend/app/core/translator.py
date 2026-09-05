@@ -29,10 +29,10 @@ FULL_PASS_TIMEOUT_BASE_SECONDS = 90
 FULL_PASS_TIMEOUT_PER_CUE_SECONDS = 2
 FULL_PASS_TIMEOUT_CAP_SECONDS = 600
 GROUP_AI_TIMEOUT_SECONDS = 45
-GOOGLE_MAX_RETRIES = 1
-GOOGLE_REQUEST_TIMEOUT_SECONDS = 10
-GOOGLE_CIRCUIT_COOLDOWN_SECONDS = 30
-MYMEMORY_REQUEST_TIMEOUT_SECONDS = 8
+GOOGLE_MAX_RETRIES = 3
+GOOGLE_REQUEST_TIMEOUT_SECONDS = 15
+GOOGLE_CIRCUIT_COOLDOWN_SECONDS = 60
+MYMEMORY_REQUEST_TIMEOUT_SECONDS = 12
 MYMEMORY_MAX_WORKERS = 4
 _google_circuit_open_until = 0.0
 
@@ -50,72 +50,17 @@ def _marker(index: int) -> str:
     return MARKER_TEMPLATE.format(index)
 
 
-# Per-cue target length for the translated text. The aim is one line on a
-# vertical short-form video so the subtitle never overflows or covers the
-# visual. Translators are told to keep the text within this range; when a
-# cue arrives longer than ``MAX_CUE_CHARS`` we still write it (so a
-# faithful translation is never dropped), but the renderer is told to use
-# the smaller font for those cues.
-TARGET_CUE_CHARS = 28
-MAX_CUE_CHARS = 40
+# Per-cue target length for the translated text lives next to ``_write_srt``
+# at the bottom of this module so the split logic and the SRT writer share
+# the same constants. Earlier versions dropped or truncated text to fit a
+# hard cap; that approach lost meaning at the end of long sentences, so
+# long cues are now split into multiple time-bounded sub-cues instead.
 
 
 def _is_chinese_lang(lang: Optional[str]) -> bool:
     if not lang:
         return False
     return lang.lower().startswith("zh")
-
-
-def _compress_too_long_cue(text: str, target_lang: Optional[str] = None) -> str:
-    """Best-effort: shorten an AI translation that still exceeded the per-cue
-    character budget. We drop filler words first; if still too long, we cut at
-    the nearest clause boundary (comma, period, conjunction) so the rendered
-    line stays readable and never ends mid-word.
-
-    For Chinese, each character counts as one visual unit, so the limits
-    translate directly. For other languages, the AI prompt keeps text within
-    the budget and this function is just a safety net.
-    """
-    if not text or len(text) <= MAX_CUE_CHARS:
-        return text
-
-    drop_patterns = [
-        r"\b(thật ra|thực ra|nói chung|nói thật|cơ bản|căn bản)\b\s*",
-        r"\b(rất|quá|cực kỳ|cực)\s+",
-        r"\b(literally|basically|honestly|actually|seriously|kind of|sort of|just|really|very)\s+",
-        r"\b(um+|uh+|er+|ah+|hmm+)\b,?\s*",
-        r"\s*[,…]+\s*",
-    ]
-    compressed = text
-    for pattern in drop_patterns:
-        new = re.sub(pattern, " ", compressed, flags=re.IGNORECASE).strip()
-        if len(new) <= MAX_CUE_CHARS:
-            return " ".join(new.split())
-        compressed = new
-
-    if len(compressed) > MAX_CUE_CHARS:
-        # Cut at the nearest clause boundary, allowing a small overshoot past
-        # MAX_CUE_CHARS so a comma sitting just past the limit is still used
-        # as the cut point instead of splitting a word. Boundaries are:
-        # comma, period, Vietnamese conjunctions (và, nhưng, hay, hoặc, vì,
-        # do), or a space.
-        search_end = min(len(compressed), MAX_CUE_CHARS + 6)
-        boundary = max(
-            compressed.rfind(",", 0, search_end),
-            compressed.rfind(".", 0, search_end),
-            compressed.rfind(" và ", 0, search_end),
-            compressed.rfind(" nhưng ", 0, search_end),
-            compressed.rfind(" hay ", 0, search_end),
-            compressed.rfind(" hoặc ", 0, search_end),
-            compressed.rfind(" vì ", 0, search_end),
-            compressed.rfind(" do ", 0, search_end),
-            compressed.rfind(" ", 0, search_end),
-        )
-        if boundary > MAX_CUE_CHARS * 0.5:
-            compressed = compressed[:boundary].rstrip(" ,.;:-")
-        else:
-            compressed = compressed[:MAX_CUE_CHARS].rstrip()
-    return " ".join(compressed.split())
 
 
 def _clean_subtitle_text(text: str) -> str:
@@ -256,13 +201,18 @@ def _google_translate_http(
 
 
 def _translate_with_retry(text: str, src: str, dest: str,
-                          max_retries: int = GOOGLE_MAX_RETRIES, delay: float = 0.25) -> Optional[str]:
-    """Translate with bounded exponential backoff."""
+                          max_retries: int = GOOGLE_MAX_RETRIES, delay: float = 1.0) -> Optional[str]:
+    """Translate with bounded exponential backoff.
+
+    Backoff starts at ``delay`` seconds and doubles per attempt, capped at 10s
+    so a single 429-spammed cue cannot stall the pipeline for more than ~17s
+    across ``GOOGLE_MAX_RETRIES`` attempts.
+    """
     for attempt in range(max_retries):
         result = _google_translate_http(text, src, dest)
         if result and result.strip():
             return result.strip()
-        wait = delay * (2 ** attempt)
+        wait = min(10.0, delay * (2 ** attempt))
         if attempt < max_retries - 1:
             logger.warning(
                 "Translation attempt %s failed; retrying in %.1fs",
@@ -301,7 +251,9 @@ def _mymemory_translate_text(
         translated = html.unescape(str(translated or "")).strip()
         if not translated or translated.casefold() == source_text.casefold():
             return None
-        return _compress_too_long_cue(translated, dest)
+        # Keep the full translation; if it is too long for a single subtitle
+        # line, write_subtitle_srt will split it into multiple time-bounded cues.
+        return translated
     except HTTPError as exc:
         logger.warning("Public translation fallback returned HTTP %s", exc.code)
     except (URLError, TimeoutError, OSError, json.JSONDecodeError, AttributeError):
@@ -433,7 +385,8 @@ def _extract_marked_translations(result: str, indices: Iterable[int], target_lan
         translated = _clean_subtitle_text(result[content_start:content_end])
         if not translated or MARKER_RE.search(translated):
             return None
-        translated = _compress_too_long_cue(translated, target_lang)
+        # Keep the full translation; if it is too long for a single subtitle
+        # line, _write_srt will split it into multiple time-bounded cues.
         index = requested[markers.index(marker)]
         translations[index] = translated
 
@@ -592,13 +545,254 @@ def _translate_with_neighbor_context(
     return translations.get(index) if translations else None
 
 
-def _write_srt(entries: list, output_path: str) -> None:
+# Per-cue target length for the translated text. The aim is one line on a
+# vertical short-form video so the subtitle never overflows or covers the
+# visual. When a translated cue exceeds TARGET_CUE_CHARS the renderer splits
+# it into multiple time-bounded sub-cues so the full meaning is preserved
+# and the viewer has time to read each line. A cue is never truncated just to
+# satisfy this budget.
+TARGET_CUE_CHARS = 28
+MAX_CUE_CHARS = 40
+# Reading speed budget per sub-cue line (chars/second). 13 is the standard
+# reading speed for subtitles and keeps each line comfortably readable.
+SUBTITLE_READING_CPS = 13.0
+# Hard floor so very short cues still get at least this much time.
+SUBTITLE_MIN_DURATION_SECONDS = 0.8
+
+
+def _seconds_to_timestamp(seconds: float) -> str:
+    """Format a float second count as ``HH:MM:SS,mmm`` for SRT output."""
+    if seconds < 0:
+        seconds = 0.0
+    total_ms = int(round(seconds * 1000))
+    hours, rem = divmod(total_ms, 3_600_000)
+    minutes, rem = divmod(rem, 60_000)
+    secs, ms = divmod(rem, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{ms:03d}"
+
+
+def _split_long_cue_into_subentries(entry: dict) -> list:
+    """Expand one SRT entry into one or more time-bounded sub-entries.
+
+    If the translated text fits within ``MAX_CUE_CHARS``, the entry is
+    returned unchanged. If it is longer, the text is split at the `` / ``
+    soft-break markers the translator emits, falling back to word boundaries
+    when the markers do not exist. The original cue's [start, end] window is
+    divided evenly across the resulting sub-cues (proportional to character
+    count), with a ``SUBTITLE_MIN_DURATION_SECONDS`` floor so a 0.4s cue
+    does not collapse to invisible frames.
+
+    Splitting here — instead of cutting characters at the translator — keeps
+    the full meaning intact and gives the viewer time to read each line.
+    """
+    text = (entry.get("translated_text") or entry.get("original_text") or "").strip()
+    if not text or len(text) <= MAX_CUE_CHARS:
+        return [entry]
+
+    start = timestamp_to_seconds(entry["start"])
+    end = timestamp_to_seconds(entry["end"])
+    total_duration = max(end - start, 0.0)
+    if total_duration <= 0:
+        return [entry]
+
+    # 1) Prefer the translator's own soft-break markers (Rule 1 in the
+    #    translation prompt) so we never break a phrase mid-word.
+    parts = [p.strip() for p in text.split(" / ") if p.strip()]
+    if len(parts) > 1 and all(len(p) <= MAX_CUE_CHARS for p in parts):
+        chunks = parts
+    else:
+        # 2) Fall back to greedy word-packing so every chunk stays under the
+        #    budget. A soft break is inserted as ' / ' so the on-screen
+        #    subtitle wraps naturally.
+        words = text.split()
+        chunks = []
+        current = []
+        current_len = 0
+        for word in words:
+            added = len(word) + (1 if current else 0)
+            if current and current_len + added > MAX_CUE_CHARS:
+                chunks.append(" ".join(current))
+                current = [word]
+                current_len = len(word)
+            else:
+                current.append(word)
+                current_len += added
+        if current:
+            chunks.append(" ".join(current))
+
+    if len(chunks) <= 1:
+        return [entry]
+
+    # 3) Allocate time per chunk proportional to its character count, with
+    #    a floor and a ceiling so no sub-cue is invisible or eats the whole
+    #    original window.
+    weights = [max(len(c), 1) for c in chunks]
+    total_weight = sum(weights)
+    # The shortest comfortable duration for a line of `weight` chars at
+    # SUBTITLE_READING_CPS, with a floor of SUBTITLE_MIN_DURATION_SECONDS.
+    raw_durations = [
+        max(SUBTITLE_MIN_DURATION_SECONDS, weight / SUBTITLE_READING_CPS)
+        for weight in weights
+    ]
+    raw_total = sum(raw_durations)
+    # Scale so the chunks fit inside the original window when there is room;
+    # otherwise use the comfortable reading time (longer window is preferred
+    # but the original duration is the hard cap to keep TTS in sync).
+    if raw_total <= total_duration:
+        scale = 1.0
+    else:
+        scale = total_duration / raw_total
+    durations = [d * scale for d in raw_durations]
+
+    # If the scaled durations leave unused time, give it to the last chunk so
+    # the on-screen window is fully covered.
+    leftover = total_duration - sum(durations)
+    if leftover > 0:
+        durations[-1] += leftover
+
+    sub_entries = []
+    cursor = start
+    for i, chunk in enumerate(chunks):
+        chunk_start = cursor
+        chunk_end = cursor + durations[i]
+        if i == len(chunks) - 1:
+            chunk_end = end  # never overshoot the original end
+        sub_entries.append({
+            "index": entry.get("index"),
+            "start": _seconds_to_timestamp(chunk_start),
+            "end": _seconds_to_timestamp(chunk_end),
+            "original_text": chunk,
+            "translated_text": chunk,
+        })
+        cursor = chunk_end
+
+    return sub_entries
+
+
+def write_subtitle_srt(entries: list, output_path: str) -> None:
+    """Write the subtitle file used for on-screen burn-in.
+
+    Long cues are split into multiple time-bounded sub-cues so the viewer can
+    read each line without scrolling. The TTS pipeline uses a different
+    SRT (see ``write_tts_srt``) where each cue keeps its full text and the
+    original timing window, so the spoken voice flows naturally without
+    artificial pauses between split lines.
+    """
+    with open(output_path, "w", encoding="utf-8") as f:
+        number = 0
+        for entry in entries:
+            for sub_entry in _split_long_cue_into_subentries(entry):
+                number += 1
+                text = sub_entry.get("translated_text") or sub_entry.get("original_text", "")
+                f.write(f"{number}\n")
+                f.write(f"{sub_entry['start']} --> {sub_entry['end']}\n")
+                f.write(f"{text}\n\n")
+
+
+def write_tts_srt(entries: list, output_path: str) -> None:
+    """Write the SRT the TTS engine reads.
+
+    Unlike ``write_subtitle_srt``, this file keeps the original cue windows
+    intact and uses the full translated text for every cue. The TTS engine
+    then produces one MP3 per cue, so the voice reads each sentence
+    continuously rather than breaking at the subtitle split points.
+    """
     with open(output_path, "w", encoding="utf-8") as f:
         for number, entry in enumerate(entries, 1):
             text = entry.get("translated_text") or entry.get("original_text", "")
             f.write(f"{number}\n")
             f.write(f"{entry['start']} --> {entry['end']}\n")
             f.write(f"{text}\n\n")
+
+
+# Backwards-compatible alias: older callers that still pass a single SRT path
+# get the subtitle variant, which is what they historically used to do both.
+_write_srt = write_subtitle_srt
+
+
+def write_both_srt_variants(tts_srt_path: str, subtitle_srt_path: str) -> None:
+    """Derive the burn-in subtitle SRT from the TTS SRT.
+
+    The TTS SRT keeps every cue with its original timing window and the full
+    translated text, so each spoken sentence flows naturally. The subtitle SRT
+    is generated on demand by splitting long cues into multiple time-bounded
+    sub-cues, which is what the on-screen renderer (and human readers) want.
+    """
+    entries = parse_srt(tts_srt_path)
+    write_subtitle_srt(entries, subtitle_srt_path)
+
+
+def build_subtitle_srt_from_actual_timing(
+    tts_srt_path: str,
+    actual_segments: list[tuple[int, float, float]],
+    output_path: str,
+) -> None:
+    """Build the burn-in SRT from the actual TTS audio timing.
+
+    The original ``subtitle.srt`` is derived from the SRT cue window, but the
+    translated voice is usually longer than the source phrase, so the audio
+    often runs past the cue's nominal ``end``. This function rebuilds the
+    subtitle file using the absolute time each segment actually occupies in
+    the merged dubbed track: ``actual_start = start_seconds``,
+    ``actual_end = start_seconds + probed_audio_duration``. Long cues are
+    then split into sub-lines sized to the real audio window so on-screen
+    text stays in lock-step with the voice.
+
+    A segment whose TTS call failed is not in ``actual_segments``; the
+    function keeps its original cue window for those entries so the subtitle
+    still appears (silently) at the expected position.
+    """
+    entries = parse_srt(tts_srt_path)
+    if not entries:
+        # Defensive: nothing to write, but clear any stale file.
+        open(output_path, "w", encoding="utf-8").close()
+        return
+
+    # Build a lookup from cue index (1-based as written by write_tts_srt) to
+    # the actual (start, end) the dubbed audio occupies. ``index`` keys the
+    # same numeric label ffmpeg and ``_generate_segment_audio`` use.
+    timing_by_idx: dict[int, tuple[float, float]] = {}
+    for raw_idx, actual_start, actual_end in actual_segments:
+        try:
+            timing_by_idx[int(raw_idx)] = (float(actual_start), float(actual_end))
+        except (TypeError, ValueError):
+            continue
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        number = 0
+        for entry in entries:
+            try:
+                entry_idx = int(entry.get("index", 0))
+            except (TypeError, ValueError):
+                entry_idx = 0
+            actual = timing_by_idx.get(entry_idx)
+            if actual is None:
+                # TTS failed for this cue. Fall back to the original timing
+                # so the subtitle still appears (the audio at that point is
+                # silent, but the on-screen text remains useful as a
+                # reference for the viewer).
+                actual_start = timestamp_to_seconds(entry["start"])
+                actual_end = timestamp_to_seconds(entry["end"])
+            else:
+                actual_start, actual_end = actual
+
+            # Build a pseudo-entry carrying the actual audio window, then
+            # re-use the standard splitter so character budgets and the
+            # `` / `` soft-break rules apply identically.
+            pseudo_entry = {
+                **entry,
+                "start": _seconds_to_timestamp(actual_start),
+                "end": _seconds_to_timestamp(max(actual_end, actual_start)),
+            }
+            for sub_entry in _split_long_cue_into_subentries(pseudo_entry):
+                number += 1
+                text = (
+                    sub_entry.get("translated_text")
+                    or sub_entry.get("original_text", "")
+                )
+                f.write(f"{number}\n")
+                f.write(f"{sub_entry['start']} --> {sub_entry['end']}\n")
+                f.write(f"{text}\n\n")
 
 
 def translate_srt_deep_translator(
@@ -621,7 +815,7 @@ def translate_srt_deep_translator(
     entries = parse_srt(srt_path)
     if not entries:
         logger.warning("No entries found in SRT file: %s", srt_path)
-        _write_srt(entries, output_path)
+        write_tts_srt(entries, output_path)
         return output_path
 
     target = _normalize_language(target_lang) or target_lang
@@ -637,7 +831,7 @@ def translate_srt_deep_translator(
     if source == target:
         for entry in entries:
             entry["translated_text"] = _clean_subtitle_text(entry.get("original_text", ""))
-        _write_srt(entries, output_path)
+        write_tts_srt(entries, output_path)
         return output_path
 
     translatable_indices = [
@@ -661,7 +855,7 @@ def translate_srt_deep_translator(
                 translation_config.provider,
                 len(translatable_indices),
             )
-            _write_srt(entries, output_path)
+            write_tts_srt(entries, output_path)
             return output_path
         logger.warning(
             "Full-context AI pass was unavailable or incomplete; falling back to grouped translation"
@@ -749,10 +943,16 @@ def translate_srt_deep_translator(
         len(entries),
     )
     if source != target and len(translated_indices) < translatable_count:
-        raise RuntimeError(
-            f"Chỉ dịch được {len(translated_indices)}/{translatable_count} phụ đề; vui lòng kiểm tra kết nối AI/Google rồi thử lại."
+        missing = translatable_count - len(translated_indices)
+        logger.warning(
+            "Translation incomplete: %d/%d cues translated; %d cues kept as original text "
+            "(AI/Google provider was rate-limited). The job will still finish so the "
+            "user gets a watchable video; those few cues will show the source language.",
+            len(translated_indices),
+            translatable_count,
+            missing,
         )
-    _write_srt(entries, output_path)
+    write_tts_srt(entries, output_path)
     return output_path
 
 

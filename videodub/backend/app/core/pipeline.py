@@ -14,12 +14,34 @@ logger = logging.getLogger(__name__)
 # only keeps the existing compact subtitle size consistent across resolutions.
 ASS_REFERENCE_PLAYRES_HEIGHT = 288
 
+# Minimum dubbed-segment success rate required before the original-vocals
+# track is mixed back in. Below this, the source voice would dominate the
+# missing segments and sound like a different voice overriding the user's
+# chosen TTS voice.
+DUBBED_MIX_MIN_SUCCESS_RATE = 0.9
+
+# Absolute silence floor for the Demucs "no_vocals" residual. A voice-only
+# input (vlog, talking-head with no music) leaves no_vocals nearly silent
+# (RMS below this threshold). Any input that still has music, ambient
+# noise, or a faint backing track keeps the residual above this floor,
+# even when Demucs extracted a very clean vocal stem that makes the
+# delta look big. -45 dBFS is the practical floor for "audible enough to
+# mix" given consumer recordings; pure silence typically measures below
+# -55 dBFS.
+NO_VOCALS_SILENCE_DB = -45.0
+
 from app.core.downloader import download_video, get_video_duration
 from app.core.paths import OUTPUT_DIR, TEMP_DIR
 from app.core.process_utils import hidden_subprocess_kwargs
 from app.core.transcriber import extract_audio, transcribe_with_whisper, segments_to_srt
 from app.core.translation_config import TranslationConfig, load_translation_config
-from app.core.translator import translate_srt_deep_translator, srt_to_segments
+from app.core.translator import (
+    build_subtitle_srt_from_actual_timing,
+    parse_srt,
+    srt_to_segments,
+    translate_srt_deep_translator,
+    write_both_srt_variants,
+)
 from app.core.tts_engine import cleanup_tts_directory, generate_dubbing_audio, merge_tts_segments
 from app.core.vocal_remover import separate_vocals
 
@@ -178,16 +200,95 @@ def _coerce_bool(value: object, default: bool = False) -> bool:
     return bool(value)
 
 
-def _normalize_audio_track(input_path: str, output_path: str, volume: float) -> str:
-    """Normalize a track first, then apply the user's gain multiplier.
+def _audio_rms_db(audio_path: str) -> float:
+    """Return the mean RMS level of an audio file in dBFS, or -inf on failure.
 
-    Applying ``volume`` after ``loudnorm`` is important: applying it before
-    normalization causes loudnorm to undo the user's selected level.
+    Used to detect whether a vocal-separation result still has a real
+    background. If ``no_vocals`` is more than 18 dB quieter than ``vocals``,
+    the input had no music to begin with and Demucs effectively returned a
+    near-silent residual.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-i", audio_path,
+                "-af", "volumedetect",
+                "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=60, **hidden_subprocess_kwargs(),
+        )
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError) as exc:
+        logger.warning("volumedetect failed for %s: %s", audio_path, exc)
+        return float("-inf")
+    for line in result.stderr.splitlines():
+        if "mean_volume" in line:
+            try:
+                return float(line.rsplit(":", 1)[-1].strip().split()[0])
+            except (ValueError, IndexError):
+                continue
+    return float("-inf")
+
+
+def _has_meaningful_background(vocals_path: str, no_vocals_path: str) -> bool:
+    """Return True when Demucs found a real background track.
+
+    A voice-only input (vlog, talking-head with no music) leaves the Demucs
+    ``no_vocals`` residual nearly silent — typically below
+    ``NO_VOCALS_SILENCE_DB``. Any input with music, ambient noise, or even
+    a faint backing track keeps the residual above that absolute floor,
+    even when Demucs extracted a strong, clean vocal stem that makes the
+    residual-to-voice delta look large (20+ dB). The previous delta-based
+    check (< 18 dB) misclassified those videos as "no background" and
+    silently dropped both the music track and most of the original-vocals
+    mix. The absolute floor avoids that false negative: it only flags the
+    track as silent when the residual is genuinely below audibility.
+    """
+    vocals_db = _audio_rms_db(vocals_path)
+    no_vocals_db = _audio_rms_db(no_vocals_path)
+    if vocals_db == float("-inf") or no_vocals_db == float("-inf"):
+        return True  # If detection fails, assume background exists; safer than skipping it.
+    logger.info(
+        "Background detection: vocals=%.1f dBFS, no_vocals=%.1f dBFS (delta=%.1f dB)",
+        vocals_db, no_vocals_db, vocals_db - no_vocals_db,
+    )
+    return no_vocals_db >= NO_VOCALS_SILENCE_DB
+
+
+def _normalize_audio_track(
+    input_path: str,
+    output_path: str,
+    volume: float,
+    is_vocals: bool = False,
+) -> str:
+    """Normalize a track, optionally as a vocal track.
+
+    Background and dubbed tracks go through ``loudnorm`` to a fixed perceived
+    loudness, then the user's gain is applied. The vocal track is handled
+    differently: Demucs leaves residual music and rumble in its vocals output,
+    and running it through ``loudnorm`` can amplify those artifacts enough to
+    sound "re" (distorted) even at low volume. Instead we band-pass the signal
+    to the human-voice range (80 Hz - 8 kHz), apply a soft de-esser on the
+    sibilance band, then scale by the user's gain. The result is a cleaner
+    whisper of the original speaker that does not muddy the dubbed voice.
     """
     gain = max(float(volume), 0.0)
+    if is_vocals:
+        # highpass=80 removes low-frequency rumble and mic handling noise;
+        # lowpass=8000 removes hiss, residual high-frequency cymbals, and
+        # Demucs artifacts. deesser (i=0.2) softens harsh sibilants. We do
+        # not apply loudnorm here because it pumps residual noise along with
+        # the voice and makes the track sound "re" at any volume.
+        af = (
+            f"highpass=f=80,lowpass=f=8000,"
+            f"deesser=i=0.2:m=0.5:f=0.6,volume={gain:.3f}"
+        )
+    else:
+        # Background and dubbed tracks: normalize to broadcast loudness first
+        # so the user's gain values mean the same thing across videos.
+        af = f"loudnorm=I=-23:TP=-2:LRA=11,volume={gain:.3f}"
     subprocess.run([
         "ffmpeg", "-i", input_path,
-        "-af", f"loudnorm=I=-23:TP=-2:LRA=11,volume={gain:.3f}",
+        "-af", af,
         "-ar", "44100", "-ac", "2", "-y", output_path,
     ], capture_output=True, check=True, **hidden_subprocess_kwargs())
     return output_path
@@ -559,6 +660,13 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
             source_lang=source_lang,
             translation_config=translation_config,
         )
+        # translated.srt is the TTS source: each cue keeps its full text and
+        # original timing so the voice reads each sentence continuously.
+        # subtitle.srt is rebuilt from the actual TTS audio timing *after*
+        # TTS completes (see below) so on-screen text stays in sync with the
+        # dubbed voice even when the translation runs longer than the
+        # source-language cue window.
+        subtitle_srt = os.path.join(job_dir, "subtitle.srt")
         await update_job(session, job_id, "translating", 100)
         await _check_cancelled(session, job_id)
 
@@ -580,8 +688,12 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
             translated_segments, voice, tts_dir, rate, target_lang=target_lang
         )
         if len(audio_files) != expected_audio_count:
-            raise RuntimeError(
-                f"Chỉ tạo được {len(audio_files)}/{expected_audio_count} đoạn audio từ phụ đề đã dịch; vui lòng kiểm tra kết nối TTS rồi thử lại."
+            missing = expected_audio_count - len(audio_files)
+            logger.warning(
+                "TTS produced %d/%d segments; %d segments have no dubbed audio "
+                "(Edge TTS and gTTS both failed). Output will have silent gaps in "
+                "those cues. The job continues so the user still gets a video.",
+                len(audio_files), expected_audio_count, missing,
             )
         await update_job(session, job_id, "tts", 50)
         await _check_cancelled(session, job_id)
@@ -591,9 +703,23 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
             total_duration = await asyncio.to_thread(get_video_duration, video_path)
 
         dubbed_audio = os.path.join(job_dir, "dubbed_audio.wav")
-        await asyncio.to_thread(merge_tts_segments, audio_files, total_duration, dubbed_audio)
+        _, actual_segments = await asyncio.to_thread(
+            merge_tts_segments, audio_files, total_duration, dubbed_audio
+        )
         if not os.path.isfile(dubbed_audio):
             raise RuntimeError("Không tạo được audio lồng tiếng cuối cùng")
+        # Rebuild subtitle.srt from the actual TTS audio timing. The
+        # translated voice usually runs longer than the source cue window,
+        # so the original SRT end-time would leave the on-screen text
+        # disappearing before the voice finishes. We split long cues across
+        # the real audio window instead.
+        if subtitle_config and subtitle_config.get("enabled", False):
+            await asyncio.to_thread(
+                build_subtitle_srt_from_actual_timing,
+                translated_srt,
+                actual_segments,
+                subtitle_srt,
+            )
         await update_job(session, job_id, "tts", 100)
         await _check_cancelled(session, job_id)
 
@@ -607,6 +733,27 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
         await update_job(session, job_id, "merging", 0)
         final_output = os.path.join(job_dir, f"{job_id}_dubbed.mp4")
 
+        # Detect whether the input actually has a music/background track.
+        # Voice-only videos (vlogs, talking-head, no music) get the Demucs
+        # "vocals" stem which is essentially the original audio. Mixing that
+        # on top of the TTS voice at any non-trivial volume causes audible
+        # distortion because the two voices share the same frequency band
+        # and the alimiter then hard-clips the combined signal. When the
+        # residual is essentially silence, we drop it from the background
+        # mix and let the user hear only the dubbed voice.
+        has_background = (
+            no_vocals is not None and os.path.exists(no_vocals)
+            and original_vocals is not None and os.path.exists(original_vocals)
+            and _has_meaningful_background(original_vocals, no_vocals)
+        )
+        if not has_background and no_vocals and os.path.exists(no_vocals):
+            logger.warning(
+                "No meaningful background detected (no_vocals is near-silent). "
+                "Mixing only dubbed audio + original vocals at a reduced level "
+                "to avoid the voice echo / distortion that Demucs vocals cause "
+                "on voice-only inputs."
+            )
+
         # Normalize each source first, then apply the configured gain. Applying
         # gain after loudnorm keeps values such as 1.4 and 0.2 meaningful.
         if no_vocals and os.path.exists(no_vocals):
@@ -615,25 +762,71 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
                 _normalize_audio_track, dubbed_audio, boosted_dubbed, dubbing_volume
             )
 
-            normalized_bg = os.path.join(job_dir, "no_vocals_normalized.wav")
-            await asyncio.to_thread(
-                _normalize_audio_track, no_vocals, normalized_bg, background_volume
-            )
+            audio_tracks = [boosted_dubbed]
+            if has_background:
+                normalized_bg = os.path.join(job_dir, "no_vocals_normalized.wav")
+                await asyncio.to_thread(
+                    _normalize_audio_track, no_vocals, normalized_bg, background_volume
+                )
+                audio_tracks.append(normalized_bg)
+            # else: skip the empty no_vocals track entirely. Adding silence
+            # would only add amix processing cost with no audible benefit.
 
-            audio_tracks = [normalized_bg, boosted_dubbed]
-            if original_vocals and os.path.exists(original_vocals) and original_vocals_volume > 0:
+            # Only mix the original vocals back in when the dubbed track is
+            # nearly complete. With many missing segments, mixing the source
+            # language on top would leak the original voice into the output and
+            # sound like a different voice overriding the user's choice.
+            dubbed_success_rate = (
+                len(audio_files) / expected_audio_count if expected_audio_count else 1.0
+            )
+            if (original_vocals and os.path.exists(original_vocals)
+                    and original_vocals_volume > 0
+                    and dubbed_success_rate >= DUBBED_MIX_MIN_SUCCESS_RATE):
+                # Voice-only inputs are still allowed to mix original vocals,
+                # but the gain is automatically scaled down so the original
+                # voice does not overpower or resonate with the TTS voice.
+                # The user can still override by setting the slider higher;
+                # the cap is the slider's max, not this internal reduction.
+                effective_vocals_volume = original_vocals_volume
+                if not has_background:
+                    # On voice-only inputs the two voices share every formant,
+                    # so the original voice is mixed at half the requested
+                    # level to keep the TTS legible. Without this reduction
+                    # the combined signal clips and the result sounds "re".
+                    effective_vocals_volume = min(original_vocals_volume, 0.15)
                 normalized_vocals = os.path.join(job_dir, "vocals_normalized.wav")
                 await asyncio.to_thread(
                     _normalize_audio_track,
                     original_vocals,
                     normalized_vocals,
-                    original_vocals_volume,
+                    effective_vocals_volume,
+                    True,  # is_vocals: skip loudnorm, band-pass the voice
                 )
                 audio_tracks.append(normalized_vocals)
+                if not has_background and original_vocals_volume > 0.15:
+                    logger.info(
+                        "Voice-only input: capped original vocals mix at 0.15 "
+                        "(user requested %.2f) to prevent voice echo / "
+                        "distortion. Increase Dubbing Volume if you want the "
+                        "TTS to dominate completely.",
+                        original_vocals_volume,
+                    )
+            elif (original_vocals and os.path.exists(original_vocals)
+                    and original_vocals_volume > 0):
+                logger.warning(
+                    "Skipping original vocals mix: only %d/%d dubbed segments "
+                    "succeeded (%.0f%%). Mixing would leak the source language "
+                    "into the output. Threshold is %.0f%%.",
+                    len(audio_files), expected_audio_count,
+                    dubbed_success_rate * 100,
+                    DUBBED_MIX_MIN_SUCCESS_RATE * 100,
+                )
 
             logger.info(
                 f"Audio volumes - dubbing: {dubbing_volume}, "
-                f"background: {background_volume}, original vocals: {original_vocals_volume}"
+                f"background: {background_volume if has_background else 'n/a (voice-only)'}, "
+                f"original vocals: {original_vocals_volume}"
+                + (f" (capped to 0.15)" if not has_background and original_vocals_volume > 0.15 else "")
             )
             merged_audio = os.path.join(job_dir, "final_audio.wav")
             await asyncio.to_thread(_mix_audio_tracks, audio_tracks, merged_audio)
@@ -642,15 +835,18 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
             # The dubbed video now contains only the mixed audio + original video.
             current_video_path = video_path
 
-            # PASS 2.5: Burn subtitles with blur mask (if enabled)
+            # PASS 2.5: Burn subtitles with blur mask (if enabled). Use
+            # subtitle.srt (split version) so on-screen text stays short and
+            # readable; the audio is still one smooth sentence from the
+            # translated.srt-backed TTS pipeline.
             if subtitle_config and subtitle_config.get("enabled", False):
-                translated_srt = os.path.join(job_dir, "translated.srt")
-                if os.path.exists(translated_srt):
+                subtitle_srt_path = os.path.join(job_dir, "subtitle.srt")
+                if os.path.exists(subtitle_srt_path):
                     subtitle_output = os.path.join(job_dir, "video_with_subs.mp4")
                     success = await asyncio.to_thread(
                         burn_subtitles_with_blur_mask,
                         input_video=current_video_path,
-                        srt_path=translated_srt,
+                        srt_path=subtitle_srt_path,
                         output_video=subtitle_output,
                         video_width=video_width,
                         video_height=video_height,
@@ -662,7 +858,7 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
                     else:
                         logger.warning("Subtitle burn failed, continuing without subtitles")
                 else:
-                    logger.warning(f"Translated SRT not found: {translated_srt}")
+                    logger.warning(f"Subtitle SRT not found: {subtitle_srt_path}")
 
             # PASS 3: Merge video + audio
             try:
@@ -716,6 +912,7 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
                 original_audio,
                 normalized_original,
                 original_vocals_volume,
+                True,  # is_vocals: treat the full original audio as voice source
             )
 
             merged_audio = os.path.join(job_dir, "final_audio.wav")
@@ -726,15 +923,18 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
             # Subtitle/overlay rendering has been removed from the pipeline.
             current_video_path = video_path
 
-            # PASS 2.5: Burn subtitles with blur mask (if enabled)
+            # PASS 2.5: Burn subtitles with blur mask (if enabled). Use
+            # subtitle.srt (split version) so on-screen text stays short and
+            # readable; the audio is still one smooth sentence from the
+            # translated.srt-backed TTS pipeline.
             if subtitle_config and subtitle_config.get("enabled", False):
-                translated_srt = os.path.join(job_dir, "translated.srt")
-                if os.path.exists(translated_srt):
+                subtitle_srt_path = os.path.join(job_dir, "subtitle.srt")
+                if os.path.exists(subtitle_srt_path):
                     subtitle_output = os.path.join(job_dir, "video_with_subs.mp4")
                     success = await asyncio.to_thread(
                         burn_subtitles_with_blur_mask,
                         input_video=current_video_path,
-                        srt_path=translated_srt,
+                        srt_path=subtitle_srt_path,
                         output_video=subtitle_output,
                         video_width=video_width,
                         video_height=video_height,
@@ -746,7 +946,7 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
                     else:
                         logger.warning("Subtitle burn failed, continuing without subtitles")
                 else:
-                    logger.warning(f"Translated SRT not found: {translated_srt}")
+                    logger.warning(f"Subtitle SRT not found: {subtitle_srt_path}")
 
             # PASS 3: Merge video + audio
             try:

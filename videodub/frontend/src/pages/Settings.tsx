@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Settings2, Mic2, Globe, Volume2, Save, RotateCcw, CheckCircle2, Cookie, Upload, Trash2, Bell } from 'lucide-react'
 import { WHISPER_MODELS, TTS_VOICES, LANGUAGES } from '@/lib/utils'
 import { getAllCookiesStatus, uploadCookies, deleteCookies, getSettings, testTranslationConnection, updateSettings } from '@/lib/api'
+import { VoicePreviewButton } from '@/components/VoicePreviewButton'
 import TranslationAiRoute from '@/components/settings/TranslationAiRoute'
 import { getTranslationProvider, type TranslationConnectionStatus, type TranslationModelOption, type TranslationProviderId } from '@/lib/translation'
 
@@ -401,8 +402,8 @@ export default function Settings() {
             <input
               type="range"
               min="0"
-              max="1.0"
-              step="0.05"
+              max="0.5"
+              step="0.01"
               value={originalVocalsVolume}
               onChange={(e) => setOriginalVocalsVolume(parseFloat(e.target.value))}
               className="w-full"
@@ -426,17 +427,34 @@ export default function Settings() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div>
             <label className="text-sm text-surface-400 mb-2 block">Giọng nói mặc định</label>
-            <select
-              value={selectedVoice}
-              onChange={(e) => setSelectedVoice(e.target.value)}
-              className="glass-input w-full appearance-none cursor-pointer"
-            >
-              {TTS_VOICES.map(voice => (
-                <option key={voice.id} value={voice.id}>
-                  {voice.name} ({voice.lang.toUpperCase()})
-                </option>
-              ))}
-            </select>
+            <div className="flex gap-2">
+              <select
+                value={selectedVoice}
+                onChange={(e) => setSelectedVoice(e.target.value)}
+                className="glass-input flex-1 appearance-none cursor-pointer"
+              >
+                {LANGUAGES.map(lang => {
+                  const voices = TTS_VOICES.filter(v => v.lang === lang.code)
+                  if (voices.length === 0) return null
+                  return (
+                    <optgroup key={lang.code} label={`${lang.flag} ${lang.name}`}>
+                      <option value="" disabled>— Nữ —</option>
+                      {voices.filter(v => v.gender === 'female').map(voice => (
+                        <option key={voice.id} value={voice.id}>{voice.name}</option>
+                      ))}
+                      <option value="" disabled>— Nam —</option>
+                      {voices.filter(v => v.gender === 'male').map(voice => (
+                        <option key={voice.id} value={voice.id}>{voice.name}</option>
+                      ))}
+                    </optgroup>
+                  )
+                })}
+              </select>
+              <VoicePreviewButton
+                voice={selectedVoice}
+                lang={TTS_VOICES.find(v => v.id === selectedVoice)?.lang}
+              />
+            </div>
           </div>
 
           <div>

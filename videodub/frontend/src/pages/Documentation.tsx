@@ -1,5 +1,31 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { BookOpen, Cpu, Mic2, Languages, Palette, Layers, HelpCircle, Workflow, Settings } from 'lucide-react'
+
+// Initialize Mermaid
+useEffect(() => {
+  const initMermaid = async () => {
+    if (typeof window !== 'undefined' && !window.localStorage.getItem('mermaid_loaded')) {
+      const script = document.createElement('script')
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.4.0/mermaid.min.js'
+      script.onload = () => {
+        if (window.mermaid) {
+          window.mermaid.initialize({
+            startOnLoad: true,
+            theme: document.documentElement.classList.contains('dark') ? 'dark' : 'default',
+            flowchart: { curve: 'basis', htmlLabels: true },
+            sequence: { useMaxWidth: true }
+          })
+          window.mermaid.init()
+        }
+        window.localStorage.setItem('mermaid_loaded', 'true')
+      }
+      document.head.appendChild(script)
+    } else if (window.mermaid) {
+      setTimeout(() => window.mermaid.init(), 100)
+    }
+  }
+  initMermaid()
+}, [])
 
 declare global {
   interface Window {
@@ -92,32 +118,6 @@ const faqs = [
 ]
 
 export default function Documentation() {
-  // Initialize Mermaid once on mount
-  useEffect(() => {
-    const initMermaid = async () => {
-      if (typeof window !== 'undefined' && !window.localStorage.getItem('mermaid_loaded')) {
-        const script = document.createElement('script')
-        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.4.0/mermaid.min.js'
-        script.onload = () => {
-          if (window.mermaid) {
-            window.mermaid.initialize({
-              startOnLoad: true,
-              theme: document.documentElement.classList.contains('dark') ? 'dark' : 'default',
-              flowchart: { curve: 'basis', htmlLabels: true },
-              sequence: { useMaxWidth: true }
-            })
-            window.mermaid.init()
-          }
-          window.localStorage.setItem('mermaid_loaded', 'true')
-        }
-        document.head.appendChild(script)
-      } else if (window.mermaid) {
-        setTimeout(() => window.mermaid.init(), 100)
-      }
-    }
-    initMermaid()
-  }, [])
-
   return (
     <div className="min-h-screen bg-gradient-to-br from-surface-950 via-surface-900 to-surface-950 pb-16">
       {/* Header */}

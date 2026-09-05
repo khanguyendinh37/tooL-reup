@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import update
 
-from app.api import dubbing, history, settings, cookies
+from app.api import dubbing, history, settings, cookies, tts_preview
 from app.core.paths import COOKIES_DIR, DATA_DIR, OUTPUT_DIR, TEMP_DIR
 from app.models.database import DubbingJob, async_session, init_db
 
@@ -43,6 +43,7 @@ app.include_router(dubbing.router, prefix="/api/dubbing", tags=["dubbing"])
 app.include_router(history.router, prefix="/api/history", tags=["history"])
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 app.include_router(cookies.router, prefix="/api/cookies", tags=["cookies"])
+app.include_router(tts_preview.router, prefix="/api/tts", tags=["tts"])
 
 
 @app.on_event("startup")

@@ -1,31 +1,5 @@
-import { useEffect, useRef } from 'react'
-import { BookOpen, Cpu, Mic2, Languages, Palette, Layers, HelpCircle, Workflow, Settings } from 'lucide-react'
-
-// Initialize Mermaid
-useEffect(() => {
-  const initMermaid = async () => {
-    if (typeof window !== 'undefined' && !window.localStorage.getItem('mermaid_loaded')) {
-      const script = document.createElement('script')
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.4.0/mermaid.min.js'
-      script.onload = () => {
-        if (window.mermaid) {
-          window.mermaid.initialize({
-            startOnLoad: true,
-            theme: document.documentElement.classList.contains('dark') ? 'dark' : 'default',
-            flowchart: { curve: 'basis', htmlLabels: true },
-            sequence: { useMaxWidth: true }
-          })
-          window.mermaid.init()
-        }
-        window.localStorage.setItem('mermaid_loaded', 'true')
-      }
-      document.head.appendChild(script)
-    } else if (window.mermaid) {
-      setTimeout(() => window.mermaid.init(), 100)
-    }
-  }
-  initMermaid()
-}, [])
+import { useEffect } from 'react'
+import { BookOpen, Cpu, Mic2, Languages, Palette, Layers, HelpCircle, Workflow, Settings, Volume2 } from 'lucide-react'
 
 declare global {
   interface Window {
@@ -67,31 +41,54 @@ const features = [
   {
     icon: Settings,
     title: 'Edge TTS + gTTS',
-    description: 'Tạo giọng lồng tiếng với Edge TTS. Tự động fallback sang gTTS nếu cần.',
+    description: '76+ giọng Edge TTS cho 20 ngôn ngữ, kèm nút "Nghe thử" trên UI. Tự động fallback sang gTTS nếu Edge TTS lỗi.',
     color: 'from-indigo-500 to-violet-500'
   }
 ]
 
 const pipelineSteps = [
-  { step: 1, title: 'Download', desc: 'Tải video từ URL (YouTube, TikTok, Facebook, Instagram)', icon: '📥' },
+  { step: 1, title: 'Download', desc: 'Tải video từ URL (10 nền tảng)', icon: '📥' },
   { step: 2, title: 'Transcribe', desc: 'Whisper nhận dạng lời thoại → SRT', icon: '🎤' },
   { step: 3, title: 'Translate', desc: 'AI dịch phụ đề (full-context hoặc grouped)', icon: '🌐' },
-  { step: 4, title: 'TTS', desc: 'Edge TTS tạo audio với voice gender matching', icon: '🔊' },
+  { step: 4, title: 'TTS', desc: 'Edge TTS tạo audio, 3-pass atempo giữ cue khớp SRT', icon: '🔊' },
   { step: 5, title: 'Separate', desc: 'Demucs tách giọng gốc', icon: '🎵' },
-  { step: 6, title: 'Merge', desc: 'FFmpeg burn phụ đề + ghép audio', icon: '🎬' }
+  { step: 6, title: 'Merge', desc: 'FFmpeg burn phụ đề + ghép audio + blur phụ đề cũ', icon: '🎬' }
 ]
 
+// A representative slice of the Edge TTS voice table (the full table
+// lives in the backend ``EDGE_TTS_VOICES`` dict and the frontend
+// ``TTS_VOICES`` array). We keep the docs short: showing every voice
+// here would bloat the page; the dropdowns in Dubbing/Settings are the
+// canonical reference. One entry per language/gender pair is enough to
+// illustrate the id format.
 const voices = [
-  { id: 'vi-VN-NamMinhNeural', gender: 'Nam', lang: 'Tiếng Việt' },
   { id: 'vi-VN-HoaiMyNeural', gender: 'Nữ', lang: 'Tiếng Việt' },
-  { id: 'en-US-GuyNeural', gender: 'Nam', lang: 'Tiếng Anh' },
+  { id: 'vi-VN-NamMinhNeural', gender: 'Nam', lang: 'Tiếng Việt' },
   { id: 'en-US-JennyNeural', gender: 'Nữ', lang: 'Tiếng Anh' },
-  { id: 'ja-JP-KeitaNeural', gender: 'Nam', lang: 'Tiếng Nhật' },
+  { id: 'en-US-AriaNeural', gender: 'Nữ', lang: 'Tiếng Anh' },
+  { id: 'en-US-GuyNeural', gender: 'Nam', lang: 'Tiếng Anh' },
+  { id: 'en-US-AndrewNeural', gender: 'Nam', lang: 'Tiếng Anh' },
+  { id: 'en-GB-SoniaNeural', gender: 'Nữ', lang: 'Tiếng Anh (UK)' },
   { id: 'ja-JP-NanamiNeural', gender: 'Nữ', lang: 'Tiếng Nhật' },
-  { id: 'ko-KR-InJoonNeural', gender: 'Nam', lang: 'Tiếng Hàn' },
+  { id: 'ja-JP-KeitaNeural', gender: 'Nam', lang: 'Tiếng Nhật' },
   { id: 'ko-KR-SunHiNeural', gender: 'Nữ', lang: 'Tiếng Hàn' },
-  { id: 'zh-CN-YunxiNeural', gender: 'Nam', lang: 'Tiếng Trung' },
-  { id: 'zh-CN-XiaoxiaoNeural', gender: 'Nữ', lang: 'Tiếng Trung' },
+  { id: 'ko-KR-InJoonNeural', gender: 'Nam', lang: 'Tiếng Hàn' },
+  { id: 'zh-CN-XiaoxiaoNeural', gender: 'Nữ', lang: 'Tiếng Trung (CN)' },
+  { id: 'zh-CN-YunxiNeural', gender: 'Nam', lang: 'Tiếng Trung (CN)' },
+  { id: 'zh-HK-HiuMaanNeural', gender: 'Nữ', lang: 'Tiếng Trung (HK)' },
+  { id: 'th-TH-PremwadeeNeural', gender: 'Nữ', lang: 'Tiếng Thái' },
+  { id: 'fr-FR-DeniseNeural', gender: 'Nữ', lang: 'Tiếng Pháp' },
+  { id: 'fr-FR-HenriNeural', gender: 'Nam', lang: 'Tiếng Pháp' },
+  { id: 'de-DE-KatjaNeural', gender: 'Nữ', lang: 'Tiếng Đức' },
+  { id: 'es-ES-ElviraNeural', gender: 'Nữ', lang: 'Tiếng Tây Ban Nha' },
+  { id: 'es-MX-DaliaNeural', gender: 'Nữ', lang: 'Tiếng Tây Ban Nha (MX)' },
+  { id: 'pt-BR-FranciscaNeural', gender: 'Nữ', lang: 'Tiếng Bồ Đào Nha (BR)' },
+  { id: 'ar-SA-ZariyahNeural', gender: 'Nữ', lang: 'Tiếng Ả Rập' },
+  { id: 'ar-EG-SalmaNeural', gender: 'Nữ', lang: 'Tiếng Ả Rập (Ai Cập)' },
+  { id: 'ru-RU-SvetlanaNeural', gender: 'Nữ', lang: 'Tiếng Nga' },
+  { id: 'hi-IN-SwaraNeural', gender: 'Nữ', lang: 'Tiếng Hindi' },
+  { id: 'it-IT-IsabellaNeural', gender: 'Nữ', lang: 'Tiếng Ý' },
+  { id: 'tr-TR-EmelNeural', gender: 'Nữ', lang: 'Tiếng Thổ Nhĩ Kỳ' },
 ]
 
 const faqs = [
@@ -105,11 +102,23 @@ const faqs = [
   },
   {
     q: 'Giọng TTS bị sai (nam nghe nữ)?',
-    a: 'Đã fix: get_fallback_voices() trả [] khi không có fallback cùng giới, thay vì trả fallbacks bất kể giới.'
+    a: 'Đã fix: get_fallback_voices() lọc fallback theo cùng giới tính với voice chính. Khi không có fallback cùng giới, trả về [] để caller giữ voice chính thay vì đổi sang giới khác.'
+  },
+  {
+    q: 'Làm sao nghe thử giọng trước khi lồng tiếng?',
+    a: 'Trong trang Dubbing hoặc Settings, bấm nút "Nghe thử" bên cạnh dropdown giọng. Backend gọi POST /api/tts/preview với voice id và trả về MP3 mẫu (câu tiếng Việt/Anh/... tùy theo target language). Có thể dùng để so sánh 76+ giọng trước khi chọn.'
+  },
+  {
+    q: 'Subtitle lệch so với audio lồng tiếng?',
+    a: 'Đã fix bằng 3-pass logic trong tts_engine.merge_tts_segments: (1) build audio thô ở tốc độ tự nhiên, (2) phát hiện overlap giữa các cue và áp dụng atempo để cue kết thúc đúng SRT start_seconds của cue kế tiếp, (3) ghép silence prefix cuối cùng. actual_start luôn khớp với SRT start_seconds nên subtitle SRT (build lại từ actual_segments) hiển thị cùng lúc với giọng.'
   },
   {
     q: 'Làm sao tùy chỉnh kích thước phụ đề?',
     a: 'Trong trang Dubbing, slider "Cỡ chữ phụ đề" cho phép chọn 10-40px.'
+  },
+  {
+    q: 'Có bao nhiêu giọng và ngôn ngữ được hỗ trợ?',
+    a: '20 ngôn ngữ (vi/en/ja/ko/zh/th/fr/de/es/pt/ru/ar/hi/id/ms/it/nl/pl/tr/uk) với 76+ giọng Edge TTS, có cả nam và nữ cho hầu hết ngôn ngữ. Bảng đầy đủ ở backend (tts_engine.py EDGE_TTS_VOICES) và frontend (lib/utils.ts TTS_VOICES).'
   },
   {
     q: 'Backend API chạy ở port nào?',
@@ -118,6 +127,34 @@ const faqs = [
 ]
 
 export default function Documentation() {
+  // Initialize Mermaid. We load the library only on first visit
+  // (cached in localStorage) to keep the docs page lightweight, and
+  // re-init on theme changes so colors track dark/light mode.
+  useEffect(() => {
+    const initMermaid = async () => {
+      if (typeof window !== 'undefined' && !window.localStorage.getItem('mermaid_loaded')) {
+        const script = document.createElement('script')
+        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.4.0/mermaid.min.js'
+        script.onload = () => {
+          if (window.mermaid) {
+            window.mermaid.initialize({
+              startOnLoad: true,
+              theme: document.documentElement.classList.contains('dark') ? 'dark' : 'default',
+              flowchart: { curve: 'basis', htmlLabels: true },
+              sequence: { useMaxWidth: true }
+            })
+            window.mermaid.init()
+          }
+          window.localStorage.setItem('mermaid_loaded', 'true')
+        }
+        document.head.appendChild(script)
+      } else if (window.mermaid) {
+        setTimeout(() => window.mermaid.init(), 100)
+      }
+    }
+    initMermaid()
+  }, [])
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-surface-950 via-surface-900 to-surface-950 pb-16">
       {/* Header */}
@@ -154,11 +191,12 @@ export default function Documentation() {
             VideoDub là ứng dụng desktop cho phép bạn tự động lồng tiếng video bằng cách:
           </p>
           <ul className="space-y-2 text-surface-400">
-            <li className="flex items-center gap-2">✓ Tải video từ URL (YouTube, TikTok, Facebook, Instagram...)</li>
-            <li className="flex items-center gap-2">✓ Nhận dạng lời thoại (Whisper AI)</li>
+            <li className="flex items-center gap-2">✓ Tải video từ URL (YouTube, TikTok, Facebook, Instagram, Twitter, Bilibili, Douyin, Xiaohongshu, Vimeo, Twitch — 10 nền tảng)</li>
+            <li className="flex items-center gap-2">✓ Nhận dạng lời thoại (Faster-Whisper AI)</li>
             <li className="flex items-center gap-2">✓ Dịch phụ đề bằng AI (OpenAI / Gemini / Anthropic / Google Translate)</li>
-            <li className="flex items-center gap-2">✓ Tạo giọng lồng tiếng với Edge TTS + gTTS fallback</li>
+            <li className="flex items-center gap-2">✓ Tạo giọng lồng tiếng với 76+ giọng Edge TTS cho 20 ngôn ngữ (kèm nút "Nghe thử" trên UI)</li>
             <li className="flex items-center gap-2">✓ Tách giọng gốc (Demucs) và ghép audio mới vào video</li>
+            <li className="flex items-center gap-2">✓ Tùy chỉnh phụ đề: cỡ chữ 10-40px, vị trí, màu sắc, blur vùng phụ đề cũ</li>
           </ul>
         </section>
 
@@ -181,9 +219,10 @@ graph TB
         B1["downloader.py<br/>Tải video (yt-dlp)"]
         B2["transcriber.py<br/>Transcribe (Whisper)"]
         B3["translator.py<br/>Dịch phụ đề (AI / Google)"]
-        B4["tts_engine.py<br/>Tạo audio (Edge TTS + gTTS)"]
+        B4["tts_engine.py<br/>Tạo audio (Edge TTS 78 voice + gTTS)<br/>merge 3-pass atempo"]
         B5["vocal_remover.py<br/>Tách giọng (Demucs)"]
         B6["pipeline.py<br/>Điều phối toàn bộ luồng"]
+        B7["api/tts_preview.py<br/>POST /api/tts/preview<br/>(Nghe thử giọng)"]
     end
 
     F1 --> B1
@@ -192,6 +231,8 @@ graph TB
     B4 --> B6
     B5 --> B6
     B6 --> F3
+    F2 --> B7
+    B4 --> B7
 
     style Backend fill:#1e3a5f,color:#fff,stroke:#0d6efd
     style Frontend fill:#2d1f4e,color:#fff,stroke:#6f42c1
@@ -242,8 +283,11 @@ sequenceDiagram
     Note over TR: AI (OpenAI/Gemini)<br/>hoặc Google Translate
     TR-->>Pipe: translated.srt
     Pipe->>TT: generate_dubbing_audio()
-    Note over TT: Edge TTS → gTTS fallback<br/>Voice gender matching
-    TT-->>Pipe: audio_files[]
+    Note over TT: Edge TTS từng cue<br/>3-pass atempo: build / overlap-fix / re-pad<br/>Voice gender matching fallback
+    TT-->>Pipe: audio_files[] + actual_segments
+    Pipe->>TT: build_subtitle_srt_from_actual_timing()
+    Note over TT: Subtitle SRT rebuild<br/>từ actual_start/actual_end
+    TT-->>Pipe: final_subtitle.srt
     Pipe->>DM: separate_vocals()
     DM-->>Pipe: vocals.wav, no_vocals.wav
     Pipe->>FF: burn_subtitles_with_blur_mask()
@@ -310,7 +354,7 @@ graph TD
               <strong>Nguyên tắc:</strong> Khi user chọn giọng nam, hệ thống <em>không bao giờ</em> tự động chuyển sang giọng nữ nếu primary voice fails. Thay vào đó, nó giữ voice chính hoặc dùng fallback cùng giới.
             </p>
           </div>
-          <h3 className="font-semibold mb-3">Bảng voice và giới tính:</h3>
+          <h3 className="font-semibold mb-3">Bảng voice (một số giọng tiêu biểu — đầy đủ 76+ giọng ở dropdown Dubbing/Settings):</h3>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -330,6 +374,73 @@ graph TD
                 ))}
               </tbody>
             </table>
+          </div>
+        </section>
+
+        {/* TTS Voice Preview */}
+        <section className="glass-card">
+          <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
+            <Volume2 className="w-5 h-5 text-primary-400" />
+            Nghe thử giọng (Voice Preview)
+          </h2>
+          <p className="text-surface-400 mb-4">
+            Mỗi dropdown chọn giọng ở trang Dubbing và Settings có một nút <strong>Nghe thử</strong> bên cạnh. Khi bấm, frontend gọi <code className="px-1 rounded bg-surface-700">POST /api/tts/preview</code> với voice id và target language, backend synthesize một câu ngắn bằng Edge TTS rồi trả về MP3. Frontend dùng <code className="px-1 rounded bg-surface-700">URL.createObjectURL</code> để phát trực tiếp blob audio.
+          </p>
+          <div className="mermaid mb-6">
+{`
+sequenceDiagram
+    participant User as Người dùng
+    participant FE as VoicePreviewButton
+    participant API as /api/tts/preview
+    participant TTS as Edge TTS
+
+    User->>FE: Bấm "Nghe thử"
+    FE->>API: POST {voice, lang}
+    API->>API: Chọn câu mẫu theo lang
+    API->>TTS: edge_tts.Communicate(text, voice)
+    TTS-->>API: MP3 bytes
+    API-->>FE: 200 audio/mpeg
+    FE->>User: Phát audio
+    Note over FE: Auto-stop khi đổi voice
+`}
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-surface-700">
+                  <th className="text-left py-2 px-3">Tham số</th>
+                  <th className="text-left py-2 px-3">Kiểu</th>
+                  <th className="text-left py-2 px-3">Mô tả</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr className="border-b border-surface-800">
+                  <td className="py-2 px-3"><code>voice</code></td>
+                  <td className="py-2 px-3 text-surface-400">string</td>
+                  <td className="py-2 px-3 text-surface-400">Edge TTS voice id (vd: <code>vi-VN-HoaiMyNeural</code>)</td>
+                </tr>
+                <tr className="border-b border-surface-800">
+                  <td className="py-2 px-3"><code>text</code></td>
+                  <td className="py-2 px-3 text-surface-400">string?</td>
+                  <td className="py-2 px-3 text-surface-400">Optional custom text. Mặc định dùng câu mẫu theo <code>lang</code> (20 câu có sẵn cho 20 ngôn ngữ)</td>
+                </tr>
+                <tr className="border-b border-surface-800">
+                  <td className="py-2 px-3"><code>lang</code></td>
+                  <td className="py-2 px-3 text-surface-400">string?</td>
+                  <td className="py-2 px-3 text-surface-400">Lang code (vi/en/ja/...) để chọn câu mẫu. Mặc định lấy từ voice prefix.</td>
+                </tr>
+                <tr>
+                  <td className="py-2 px-3"><code>rate</code></td>
+                  <td className="py-2 px-3 text-surface-400">string?</td>
+                  <td className="py-2 px-3 text-surface-400">Edge TTS rate (vd: <code>+10%</code>, <code>-5%</code>). Mặc định <code>+0%</code>.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div className="p-4 rounded-lg bg-blue-500/10 border border-blue-500/20 mt-4">
+            <p className="text-sm text-blue-400">
+              <strong>Bảo mật:</strong> Endpoint sanitize control chars + bidi overrides, giới hạn 200 ký tự để chặn misuse. Cache header <code>Cache-Control: private, max-age=300</code> để không gọi Edge TTS lặp lại khi user click nhiều lần cùng voice.
+            </p>
           </div>
         </section>
 
@@ -450,7 +561,8 @@ graph TD
               <tbody>
                 <tr className="border-b border-surface-800"><td className="py-2 px-3 text-surface-400 font-mono text-xs">app/api/settings.py</td><td className="py-2 px-3 text-surface-400">DEFAULT_SETTINGS, SUBTITLE_SIZE_PRESETS, _parse_subtitle_config, _build_subtitle_config</td></tr>
                 <tr className="border-b border-surface-800"><td className="py-2 px-3 text-surface-400 font-mono text-xs">app/api/dubbing.py</td><td className="py-2 px-3 text-surface-400">API endpoint, _map_subtitle_config chuyển config frontend → pipeline</td></tr>
-                <tr className="border-b border-surface-800"><td className="py-2 px-3 text-surface-400 font-mono text-xs">app/core/tts_engine.py</td><td className="py-2 px-3 text-surface-400">VOICE_GENDERS, VOICE_FALLBACKS, get_fallback_voices(), _detect_text_language()</td></tr>
+                <tr className="border-b border-surface-800"><td className="py-2 px-3 text-surface-400 font-mono text-xs">app/api/tts_preview.py</td><td className="py-2 px-3 text-surface-400">POST /api/tts/preview — synthesize câu mẫu ngắn để nghe thử giọng</td></tr>
+                <tr className="border-b border-surface-800"><td className="py-2 px-3 text-surface-400 font-mono text-xs">app/core/tts_engine.py</td><td className="py-2 px-3 text-surface-400">EDGE_TTS_VOICES (78), VOICE_GENDERS, VOICE_FALLBACKS, get_fallback_voices(), merge_tts_segments() 3-pass atempo</td></tr>
                 <tr className="border-b border-surface-800"><td className="py-2 px-3 text-surface-400 font-mono text-xs">app/core/translation_providers.py</td><td className="py-2 px-3 text-surface-400">TRANSLATION_SYSTEM_PROMPT (8 rules), translate_marked_block()</td></tr>
                 <tr className="border-b border-surface-800"><td className="py-2 px-3 text-surface-400 font-mono text-xs">app/core/translator.py</td><td className="py-2 px-3 text-surface-400">_compress_too_long_cue(), translate_srt_deep_translator(), _context_groups()</td></tr>
                 <tr className="border-b border-surface-800"><td className="py-2 px-3 text-surface-400 font-mono text-xs">app/core/pipeline.py</td><td className="py-2 px-3 text-surface-400">run_pipeline() điều phối toàn bộ luồng, burn_subtitles_with_blur_mask()</td></tr>

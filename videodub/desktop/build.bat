@@ -22,9 +22,15 @@ if errorlevel 1 (
 
 if not exist "%VPY%" (
     echo [1/6] Tao backend virtualenv...
-    py -3 -m venv "%VENV%"
+    rem Pin to Python 3.11 — pydantic-core (PyO3) and av fail to build
+    rem against Python 3.14 on the GitHub Actions windows-latest runner.
+    set "PY_BIN=py -3.11"
+    where.exe python3.11 >nul 2>&1
+    if not errorlevel 1 set "PY_BIN=python3.11"
+    %PY_BIN% -m venv "%VENV%"
     if errorlevel 1 (
-        echo [ERROR] Khong tao duoc Python virtualenv.
+        echo [ERROR] Khong tao duoc Python 3.11 virtualenv.
+        echo         Cai Python 3.11 (https://www.python.org/downloads/) roi chay lai.
         exit /b 1
     )
 ) else (

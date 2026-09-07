@@ -16,14 +16,26 @@ echo "  VideoDub - Desktop Build (macOS)"
 echo "========================================"
 echo ""
 
-# 1. Python
+# 1. Python — pin to 3.11 because pydantic-core (PyO3) and av fail to
+#    build against Python 3.14+ on recent GitHub Actions runners.
 echo "[1/6] Checking Python..."
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "[ERROR] python3 not found. Install Xcode Command Line Tools or Homebrew Python."
+PYTHON_BIN=""
+for candidate in python3.11 python3.12 python3.13 python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        CAND_VERSION=$("$candidate" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+        if [ "$CAND_VERSION" = "3.11" ] || [ "$CAND_VERSION" = "3.12" ] || [ "$CAND_VERSION" = "3.13" ]; then
+            PYTHON_BIN="$candidate"
+            PYTHON_VERSION="$CAND_VERSION"
+            break
+        fi
+    fi
+done
+if [ -z "$PYTHON_BIN" ]; then
+    echo "[ERROR] No compatible Python (3.11-3.13) found."
+    echo "        Install: brew install python@3.11"
     exit 1
 fi
-PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-echo "       Python $PYTHON_VERSION found."
+echo "       Python $PYTHON_VERSION found at $(command -v "$PYTHON_BIN")"
 
 # 2. Node.js
 echo "[2/6] Checking Node.js..."
@@ -40,7 +52,7 @@ echo "       Node.js $(node -v) found."
 # 3. Virtualenv
 echo "[3/6] Setting up Python virtualenv..."
 if [ ! -d "$VENV_DIR" ]; then
-    python3 -m venv "$VENV_DIR"
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
 fi
 "$VENV_DIR/bin/python" -m pip install --upgrade pip
 "$VENV_DIR/bin/python" -m pip install -r "$DESKTOP_DIR/requirements.txt"

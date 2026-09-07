@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from PyInstaller.building.build_main import Analysis, COLLECT, EXE, PYZ
+from PyInstaller.building.osx import BUNDLE
 from PyInstaller.utils.hooks import collect_all
 
 
@@ -82,4 +83,11 @@ coll = COLLECT(
     upx=True,
     upx_exclude=[],
     name="VideoDub",
+)
+
+app = BUNDLE(
+    coll,
+    name="VideoDub.app",
+    icon=str(icon_path) if icon_path.is_file() else None,
+    bundle_identifier="com.videodub.desktop",
 )

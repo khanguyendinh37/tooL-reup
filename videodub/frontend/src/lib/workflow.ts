@@ -207,6 +207,7 @@ export function workflowFromJob(
       position?: string
       position_y?: number
       custom_y?: number
+      font_size?: number | string
       font_color?: string
       blur_existing_subtitles?: boolean
       blur_region?: BlurRegion
@@ -261,7 +262,7 @@ export function workflowFromJob(
       subtitlePosition: position,
       subtitlePositionY: positionY,
       subtitleColor: color,
-      subtitleSize: subtitleConfig?.font_size ? parseInt(subtitleConfig?.font_size, 10) : 13,
+      subtitleSize: subtitleConfig?.font_size ? parseInt(String(subtitleConfig.font_size), 10) : 13,
       blurExistingSubtitles: subtitleConfig?.blur_existing_subtitles,
       blurRegion: savedBlurRegion,
       dubbingVolume: processingConfig?.audio_config?.dubbing_volume,

@@ -41,7 +41,7 @@ jobs:
       - name: Install FFmpeg (Chocolatey)
         run: |
           choco install ffmpeg -y --no-progress
-          echo "C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin" >> $GITHUB_PATH
+          "C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin" >> $env:GITHUB_PATH
 
       - name: Verify FFmpeg
         run: |
@@ -49,9 +49,10 @@ jobs:
           ffprobe -version
 
       - name: Build Windows Desktop
+        shell: cmd
+        working-directory: videodub
         run: |
-          cd videodub
-          desktop\build.bat
+          call desktop\build.bat
 
       - name: Zip Windows artifact (PowerShell)
         shell: pwsh

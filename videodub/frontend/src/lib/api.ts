@@ -140,7 +140,7 @@ export async function startDubbing(params: {
   subtitle_enabled?: boolean
   subtitle_position?: string
   subtitle_position_y?: number
-  subtitle_size?: string
+  subtitle_size?: number
   subtitle_color?: string
   blur_existing_subtitles?: boolean
   blur_region?: BlurRegion

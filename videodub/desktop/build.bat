@@ -22,15 +22,14 @@ if errorlevel 1 (
 
 if not exist "%VPY%" (
     echo [1/6] Tao backend virtualenv...
-    rem Pin to Python 3.11 — pydantic-core (PyO3) and av fail to build
-    rem against Python 3.14 on the GitHub Actions windows-latest runner.
+    rem Prefer the Python 3.11 interpreter installed by setup-python.
     set "PY_BIN=py -3.11"
-    where.exe python3.11 >nul 2>&1
-    if not errorlevel 1 set "PY_BIN=python3.11"
-    %PY_BIN% -m venv "%VENV%"
+    python -c "import sys; sys.exit(sys.version_info[:2] != (3, 11))" >nul 2>&1
+    if not errorlevel 1 set "PY_BIN=python"
+    !PY_BIN! -m venv "%VENV%"
     if errorlevel 1 (
         echo [ERROR] Khong tao duoc Python 3.11 virtualenv.
-        echo         Cai Python 3.11 (https://www.python.org/downloads/) roi chay lai.
+        echo         Cai Python 3.11 tu https://www.python.org/downloads/ roi chay lai.
         exit /b 1
     )
 ) else (
@@ -63,6 +62,7 @@ popd
 
 echo [4/6] Cai dependencies desktop va backend...
 "%VPY%" -m pip install --upgrade pip
+if errorlevel 1 exit /b 1
 "%VPY%" -m pip install -r "%DESKTOP%\requirements.txt"
 if errorlevel 1 (
     echo [ERROR] Cai Python dependencies that bai.
@@ -104,13 +104,18 @@ if errorlevel 1 (
 
 echo [7/7] Build VideoDub.exe (onedir)...
 pushd "%DESKTOP%"
-"%VPY%" -m PyInstaller --noconfirm --clean VideoDub.spec
+"%VPY%" -m PyInstaller --noconfirm --clean --distpath "%DESKTOP%\dist" --workpath "%DESKTOP%\build" VideoDub.spec
 if errorlevel 1 (
     popd
     echo [ERROR] PyInstaller build that bai.
     exit /b 1
 )
 popd
+
+if not exist "%DESKTOP%\dist\VideoDub\VideoDub.exe" (
+    echo [ERROR] PyInstaller khong tao VideoDub.exe tai thu muc dist.
+    exit /b 1
+)
 
 echo.
 echo ========================================
@@ -122,5 +127,6 @@ echo   %DESKTOP%\dist\VideoDub
 echo.
 echo Run:
 echo   desktop\run_desktop.bat
+if not defined CI pause
 endlocal
-pause
+exit /b 0

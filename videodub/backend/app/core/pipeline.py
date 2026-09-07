@@ -688,12 +688,9 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
             translated_segments, voice, tts_dir, rate, target_lang=target_lang
         )
         if len(audio_files) != expected_audio_count:
-            missing = expected_audio_count - len(audio_files)
-            logger.warning(
-                "TTS produced %d/%d segments; %d segments have no dubbed audio "
-                "(Edge TTS and gTTS both failed). Output will have silent gaps in "
-                "those cues. The job continues so the user still gets a video.",
-                len(audio_files), expected_audio_count, missing,
+            raise RuntimeError(
+                f"Chỉ tạo được {len(audio_files)}/{expected_audio_count} đoạn "
+                f"lồng tiếng bằng giọng {voice}. Vui lòng thử lại."
             )
         await update_job(session, job_id, "tts", 50)
         await _check_cancelled(session, job_id)

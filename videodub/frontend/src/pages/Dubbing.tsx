@@ -38,6 +38,22 @@ function VideoPreview({ videoUrl, controls = true, stageRef, overlay }: VideoPre
   const [aspectRatio, setAspectRatio] = useState('16 / 9')
   const [aspectRatioValue, setAspectRatioValue] = useState(16 / 9)
   const videoRef = useRef<HTMLVideoElement>(null)
+  const [currentTime, setCurrentTime] = useState(0)
+  const [duration, setDuration] = useState(0)
+
+  useEffect(() => {
+    setCurrentTime(0)
+    setDuration(0)
+    setVideoReady(false)
+    setVideoLoading(true)
+    setVideoError(false)
+  }, [videoUrl])
+
+  const updateDuration = () => {
+    const value = videoRef.current?.duration
+    setDuration(value && Number.isFinite(value) ? value : 0)
+  }
+  const formatTime = (value: number) => `${Math.floor(value / 60)}:${Math.floor(value % 60).toString().padStart(2, '0')}`
 
   const handleVideoError = () => {
     setVideoError(true)
@@ -45,6 +61,7 @@ function VideoPreview({ videoUrl, controls = true, stageRef, overlay }: VideoPre
   }
 
   const handleVideoLoadedMetadata = () => {
+    updateDuration()
     const video = videoRef.current
     if (!video?.videoWidth || !video.videoHeight) return
     setAspectRatio(`${video.videoWidth} / ${video.videoHeight}`)
@@ -103,6 +120,8 @@ function VideoPreview({ videoUrl, controls = true, stageRef, overlay }: VideoPre
           onLoadedMetadata={handleVideoLoadedMetadata}
           onLoadedData={handleVideoLoadedData}
           onCanPlay={handleVideoCanPlay}
+          onDurationChange={updateDuration}
+          onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
         />
         {overlay}
         {videoError && (
@@ -120,6 +139,26 @@ function VideoPreview({ videoUrl, controls = true, stageRef, overlay }: VideoPre
             </div>
           </div>
         )}
+      </div>
+      <div className="flex items-center gap-3 px-4 py-3">
+        <span className="text-xs text-surface-300 tabular-nums">{formatTime(currentTime)}</span>
+        <input
+          type="range"
+          aria-label="Tua video"
+          aria-valuetext={`${formatTime(currentTime)} / ${formatTime(duration)}`}
+          min={0}
+          max={duration || 1}
+          step={0.1}
+          value={Math.min(currentTime, duration)}
+          disabled={!duration || videoError}
+          onChange={(event) => {
+            const time = Number(event.target.value)
+            if (videoRef.current) videoRef.current.currentTime = time
+            setCurrentTime(time)
+          }}
+          className="h-6 min-w-0 flex-1 accent-primary-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary-400"
+        />
+        <span className="text-xs text-surface-300 tabular-nums">{formatTime(duration)}</span>
       </div>
     </div>
   )
@@ -630,10 +669,6 @@ export default function Dubbing() {
                 className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2 whitespace-nowrap"
               >
                 <Play className="w-4 h-4 sm:w-5 sm:h-5" /> Bắt đầu lồng tiếng
-              </button>
-            ) : workflowPhase === 'processing' ? (
-              <button disabled className="btn-primary w-full sm:w-auto inline-flex items-center justify-center gap-2 opacity-50 whitespace-nowrap">
-                <Loader2 className="w-4 h-4 sm:w-5 sm:h-5 animate-spin" /> Đang xử lý...
               </button>
             ) : workflowPhase === 'completed' ? (
               <button onClick={handleReset} className="btn-secondary w-full sm:w-auto inline-flex items-center justify-center gap-2 whitespace-nowrap">

@@ -748,9 +748,8 @@ def build_subtitle_srt_from_actual_timing(
         open(output_path, "w", encoding="utf-8").close()
         return
 
-    # Build a lookup from cue index (1-based as written by write_tts_srt) to
-    # the actual (start, end) the dubbed audio occupies. ``index`` keys the
-    # same numeric label ffmpeg and ``_generate_segment_audio`` use.
+    # Audio indices are zero-based positions in srt_to_segments, not SRT
+    # cue labels (which are usually one-based and can be nonconsecutive).
     timing_by_idx: dict[int, tuple[float, float]] = {}
     for raw_idx, actual_start, actual_end in actual_segments:
         try:
@@ -760,11 +759,7 @@ def build_subtitle_srt_from_actual_timing(
 
     with open(output_path, "w", encoding="utf-8") as f:
         number = 0
-        for entry in entries:
-            try:
-                entry_idx = int(entry.get("index", 0))
-            except (TypeError, ValueError):
-                entry_idx = 0
+        for entry_idx, entry in enumerate(entries):
             actual = timing_by_idx.get(entry_idx)
             if actual is None:
                 # TTS failed for this cue. Fall back to the original timing

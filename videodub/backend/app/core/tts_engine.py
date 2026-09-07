@@ -17,7 +17,7 @@ TTS_SEGMENT_TIMEOUT_SECONDS = 90
 
 # Retry resilience for a single Edge TTS call. ``EDGE_TTS_RETRY_BASE_SECONDS``
 # doubles per attempt, capped at 10s, so up to 3 attempts takes ~17s worst
-# case before the caller falls back to the next voice.
+# case without switching speakers.
 EDGE_TTS_MAX_ATTEMPTS = 3
 EDGE_TTS_RETRY_BASE_SECONDS = 1.0
 
@@ -388,19 +388,14 @@ async def text_to_speech_edge(text: str, voice: str, output_path: str, rate: str
     blip, "No audio was received") recover without the caller falling back to
     a different voice or gTTS.
     """
-    import time
     edge_voice = get_edge_voice(voice)
-    # Validate the voice matches the language of the text. If the voice
-    # belongs to a different language family than the text, fall back to
-    # gTTS which actually pronounces the target language correctly.
+    # Warn about language mismatches without changing speaker identity.
     text_lang = _detect_text_language(text)
     voice_lang = edge_voice.split("-")[0] if edge_voice else ""
     if text_lang and voice_lang and text_lang != voice_lang and text_lang != "auto":
-        # The voice may not pronounce this language correctly. gTTS
-        # fallback will speak the target language accurately.
         logger.warning(
             "Voice '%s' (%s) may not pronounce text in '%s' correctly; "
-            "gTTS fallback will speak the target language accurately",
+            "keeping the selected voice to preserve speaker identity",
             edge_voice, voice_lang, text_lang,
         )
     try:
@@ -449,47 +444,11 @@ async def text_to_speech_gtts(text: str, lang: str, output_path: str, slow: bool
 
 
 async def text_to_speech_with_fallback(text: str, voice: str, output_path: str, rate: str = "+0%", target_lang: str = "vi") -> str:
-    """Try Edge TTS with fallbacks, then fall back to gTTS.
+    """Retry the selected voice only; never substitute a different speaker.
 
-    Args:
-        text: Text to synthesize
-        voice: Voice ID (e.g., 'vi-VN-HoaiMyNeural', 'en-US-GuyNeural')
-        output_path: Output audio file path
-        rate: Speech rate (e.g., '+0%', '+20%')
-        target_lang: Target language code (e.g., 'vi', 'en', 'ja') - used for gTTS
-                     fallback to ensure correct language is spoken regardless of
-                     the voice parameter.
+    The function name and target_lang argument remain for caller compatibility.
     """
-    # Try primary voice (text_to_speech_edge already logs per-attempt failures)
-    primary_voice = get_edge_voice(voice)
-    try:
-        return await text_to_speech_edge(text, voice, output_path, rate)
-    except Exception as e:
-        logger.warning("Primary voice '%s' exhausted retries: %s", primary_voice, e)
-
-    # Try fallback voices
-    fallback_voices = get_fallback_voices(voice)
-    for fb_voice in fallback_voices:
-        try:
-            logger.info("Trying fallback voice: %s", fb_voice)
-            return await text_to_speech_edge(text, fb_voice, output_path, rate)
-        except Exception as e:
-            logger.warning("Fallback voice '%s' exhausted retries: %s", fb_voice, e)
-
-    # Try gTTS as last resort - USE target_lang, not voice prefix
-    # Map language codes for gTTS (Google Translate TTS language codes)
-    gtts_lang_map = {
-        "vi": "vi", "en": "en", "ja": "ja", "ko": "ko", "zh": "zh-cn",
-        "th": "th", "fr": "fr", "de": "de", "es": "es", "pt": "pt",
-        "ru": "ru", "ar": "ar", "hi": "hi", "id": "id", "ms": "ms"
-    }
-    gtts_lang = gtts_lang_map.get(target_lang.lower(), "en")
-    try:
-        logger.info(f"Falling back to gTTS with target_lang: {target_lang} -> gTTS lang: {gtts_lang}")
-        return await text_to_speech_gtts(text, gtts_lang, output_path)
-    except Exception as e:
-        logger.error(f"All TTS methods failed: {e}")
-        raise
+    return await text_to_speech_edge(text, voice, output_path, rate)
 
 
 async def _generate_segment_audio(index: int, segment: dict, voice: str,
@@ -497,8 +456,7 @@ async def _generate_segment_audio(index: int, segment: dict, voice: str,
                                   semaphore: asyncio.Semaphore) -> dict | None:
     """Generate one segment while respecting the global TTS concurrency limit.
 
-    target_lang is passed through so the gTTS fallback speaks the destination
-    language even if the user picked a voice whose prefix differs.
+    Each segment keeps the selected voice, including retries.
     """
     text = segment.get("text", "").strip()
     if not text:
@@ -507,8 +465,7 @@ async def _generate_segment_audio(index: int, segment: dict, voice: str,
     segment_path = os.path.join(output_dir, f"seg_{index:04d}.mp3")
     async with semaphore:
         try:
-            # Use fallback chain: Edge TTS -> fallback voices -> gTTS. A
-            # provider that hangs must not hold a job in TTS forever.
+            # Retry the selected voice with a bounded timeout.
             await asyncio.wait_for(
                 text_to_speech_with_fallback(text, voice, segment_path, rate, target_lang),
                 timeout=TTS_SEGMENT_TIMEOUT_SECONDS,
@@ -522,7 +479,7 @@ async def _generate_segment_audio(index: int, segment: dict, voice: str,
             }
         except Exception as exc:
             logger.error(
-                f"Failed to generate TTS for segment {index} after all fallbacks: {exc}"
+                f"Failed to generate TTS for segment {index} with selected voice {voice}: {exc}"
             )
             return None
 
@@ -549,8 +506,7 @@ async def generate_dubbing_audio(segments: list, voice: str,
                                  target_lang: str = "vi") -> list:
     """Generate all TTS segments concurrently while preserving timeline order.
 
-    target_lang is used for the gTTS fallback so the fallback voice speaks the
-    destination language instead of the voice's language prefix.
+    Reject incomplete batches instead of publishing missing speech.
     """
     os.makedirs(output_dir, exist_ok=True)
     semaphore = asyncio.Semaphore(TTS_CONCURRENCY)
@@ -568,7 +524,13 @@ async def generate_dubbing_audio(segments: list, voice: str,
         f"Generating {len(tasks)} TTS segments concurrently (limit={TTS_CONCURRENCY})"
     )
     results = await asyncio.gather(*tasks)
-    return [result for result in results if result is not None]
+    failed = sum(result is None for result in results)
+    if failed:
+        raise RuntimeError(
+            f"Không tạo được {failed}/{len(tasks)} đoạn lồng tiếng bằng giọng {voice}. "
+            "Hệ thống giữ nguyên giọng đã chọn. Vui lòng thử lại."
+        )
+    return results
 
 
 def _atempo_chain(speed: float) -> str:
@@ -678,7 +640,6 @@ def merge_tts_segments(audio_files: list, total_duration: float,
             working_path = os.path.join(padded_dir, f"audio_{i:04d}.wav")
             padded_path = os.path.join(padded_dir, f"padded_{i:04d}.wav")
             start_seconds = max(float(af.get("start", 0.0)), 0.0)
-            segment_duration = _probe_duration_seconds(audio_path)
             # Normalize the TTS MP3 into a 44.1kHz stereo WAV the rest
             # of the pipeline can probe and re-encode cheaply. Without
             # this the concat demuxer would still work, but ``ffprobe``
@@ -689,6 +650,7 @@ def merge_tts_segments(audio_files: list, total_duration: float,
                 "-ar", "44100", "-ac", "2",
                 "-y", working_path,
             ], capture_output=True, check=True, **hidden_subprocess_kwargs())
+            segment_duration = _probe_duration_seconds(working_path)
             # ``silence_prefix`` is exactly the gap between the previous
             # segment's end and this cue's nominal start. ``max(..., 0)``
             # drops any negative gap (overlap) to zero so the concat
@@ -824,6 +786,10 @@ def merge_tts_segments(audio_files: list, total_duration: float,
         previous_end = 0.0
         for spec in build_specs:
             silence_prefix = max(spec["actual_start"] - previous_end, 0.0)
+            # Match the millisecond precision used by the silence generator.
+            silence_prefix = round(silence_prefix, 3)
+            actual_start = previous_end + silence_prefix
+            speech_duration = _probe_duration_seconds(spec["working_path"])
             if silence_prefix > 0.0:
                 subprocess.run([
                     "ffmpeg",
@@ -846,7 +812,9 @@ def merge_tts_segments(audio_files: list, total_duration: float,
                 ], capture_output=True, check=True, **hidden_subprocess_kwargs())
             spec["silence_prefix"] = silence_prefix
             list_lines.append(f"file '{_escape_ffmpeg_path(spec['padded_path'])}'")
-            previous_end = spec["actual_end"]
+            spec["actual_start"] = actual_start
+            spec["actual_end"] = min(actual_start + speech_duration, total_duration)
+            previous_end += _probe_duration_seconds(spec["padded_path"])
 
         # Snapshot the final positions for the caller. ``actual_segments``
         # must reflect what the on-disk audio actually contains so the
@@ -854,6 +822,7 @@ def merge_tts_segments(audio_files: list, total_duration: float,
         actual_segments = [
             (spec["cue_index"], spec["actual_start"], spec["actual_end"])
             for spec in build_specs
+            if spec["actual_start"] < total_duration
         ]
 
         with open(concat_list_path, "w", encoding="utf-8") as f:

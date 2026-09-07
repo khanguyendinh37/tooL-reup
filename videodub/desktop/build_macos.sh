@@ -86,7 +86,14 @@ echo "[6/6] Generating icons..."
 # 7. PyInstaller build
 echo "[7/7] Building macOS app (onedir)..."
 cd "$DESKTOP_DIR"
-"$VENV_DIR/bin/pyinstaller" --noconfirm --clean VideoDub_macos.spec
+"$VENV_DIR/bin/python" -m PyInstaller --noconfirm --clean \
+    --distpath "$DESKTOP_DIR/dist" --workpath "$DESKTOP_DIR/build" VideoDub_macos.spec
+
+if [ ! -f "$DESKTOP_DIR/dist/VideoDub.app/Contents/MacOS/VideoDub" ] || \
+   [ ! -f "$DESKTOP_DIR/dist/VideoDub.app/Contents/Info.plist" ]; then
+    echo "[ERROR] PyInstaller did not create a complete VideoDub.app bundle."
+    exit 1
+fi
 
 echo ""
 echo "========================================"

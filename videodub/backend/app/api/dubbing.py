@@ -3,7 +3,8 @@ import asyncio
 import json
 import logging
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from app.core.video_response import video_response
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
@@ -374,7 +375,7 @@ async def get_status(job_id: str, session: AsyncSession = Depends(get_session)):
 
 
 @router.get("/{job_id}/preview-url")
-async def get_preview_url(job_id: str, session: AsyncSession = Depends(get_session)):
+async def get_preview_url(job_id: str, request: Request, session: AsyncSession = Depends(get_session)):
     """Get the preview video URL for a downloaded video."""
     result = await session.execute(
         select(DubbingJob).where(DubbingJob.id == job_id)
@@ -387,14 +388,11 @@ async def get_preview_url(job_id: str, session: AsyncSession = Depends(get_sessi
     if not file_path or not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Preview video not ready yet")
 
-    return FileResponse(
-        file_path,
-        media_type="video/mp4",
-    )
+    return video_response(file_path, request)
 
 
 @router.get("/{job_id}/download")
-async def download_result(job_id: str, session: AsyncSession = Depends(get_session)):
+async def download_result(job_id: str, request: Request, session: AsyncSession = Depends(get_session)):
     result = await session.execute(
         select(DubbingJob).where(DubbingJob.id == job_id)
     )
@@ -409,15 +407,14 @@ async def download_result(job_id: str, session: AsyncSession = Depends(get_sessi
     if not file_path or not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail=f"File not found at: {file_path}")
 
-    return FileResponse(
-        file_path,
+    return video_response(
+        file_path, request,
         filename=f"{job.title or job_id}_dubbed.mp4",
-        media_type="video/mp4",
     )
 
 
 @router.get("/{job_id}/download-original")
-async def download_original(job_id: str, session: AsyncSession = Depends(get_session)):
+async def download_original(job_id: str, request: Request, session: AsyncSession = Depends(get_session)):
     """Download the original video (preview) for a job."""
     result = await session.execute(
         select(DubbingJob).where(DubbingJob.id == job_id)
@@ -433,10 +430,9 @@ async def download_original(job_id: str, session: AsyncSession = Depends(get_ses
     if not file_path or not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail=f"Original video file not found at: {file_path}")
 
-    return FileResponse(
-        file_path,
+    return video_response(
+        file_path, request,
         filename=f"{job.title or job_id}_original.mp4",
-        media_type="video/mp4",
     )
 
 

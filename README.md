@@ -16,7 +16,7 @@ VideoDub là công cụ lồng tiếng video tự động sử dụng AI: tải 
 | 🍎 **macOS** | [Tải VideoDub-macos.zip](https://github.com/khanguyendinh37/tooL-reup/releases/latest/download/VideoDub-macos.zip) | macOS 12+ (Monterey), chưa notarize |
 
 > **Cài nhanh**:
-> - **Windows**: giải nén → double-click `VideoDub.exe` → xong.
+> - **Windows**: giải nén toàn bộ thư mục → chạy `Start-VideoDub.bat`. File này bỏ chặn các file trong riêng thư mục VideoDub rồi mở app, giúp tránh lỗi `Python.Runtime.Loader.Initialize`. Sau lần đầu có thể mở trực tiếp `VideoDub.exe`.
 > - **macOS**: giải nén → chuột phải `VideoDub.app` → **Open** (lần đầu để vượt Gatekeeper) → kéo vào Applications.
 
 > Các link trên tải bản Release chính thức mới nhất. Nếu chưa có bản phát hành, vào [Actions](https://github.com/khanguyendinh37/tooL-reup/actions/workflows/build-release.yml) → chọn lượt build thành công → **Artifacts** để tải bản build, hoặc xem [tất cả Releases](https://github.com/khanguyendinh37/tooL-reup/releases).

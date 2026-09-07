@@ -117,6 +117,9 @@ if not exist "%DESKTOP%\dist\VideoDub\VideoDub.exe" (
     exit /b 1
 )
 
+copy /Y "%DESKTOP%\Start-VideoDub.bat" "%DESKTOP%\dist\VideoDub\Start-VideoDub.bat" >nul
+if errorlevel 1 exit /b 1
+
 echo.
 echo ========================================
 echo   Desktop build completed!

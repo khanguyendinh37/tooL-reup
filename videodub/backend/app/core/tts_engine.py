@@ -12,8 +12,10 @@ logger = logging.getLogger(__name__)
 
 # Keep a small bounded pool so Edge TTS requests can run concurrently without
 # overwhelming the service or the local machine.
-TTS_CONCURRENCY = 4
+TTS_CONCURRENCY = 2
 TTS_SEGMENT_TIMEOUT_SECONDS = 90
+TTS_RECOVERY_ROUNDS = 2
+TTS_RECOVERY_DELAY_SECONDS = 10
 
 # Retry resilience for a single Edge TTS call. ``EDGE_TTS_RETRY_BASE_SECONDS``
 # doubles per attempt, capped at 10s, so up to 3 attempts takes ~17s worst
@@ -510,10 +512,13 @@ async def generate_dubbing_audio(segments: list, voice: str,
     """
     os.makedirs(output_dir, exist_ok=True)
     semaphore = asyncio.Semaphore(TTS_CONCURRENCY)
+    indexed_segments = [
+        (index, segment) for index, segment in enumerate(segments)
+        if segment.get("text", "").strip()
+    ]
     tasks = [
         _generate_segment_audio(index, segment, voice, output_dir, rate, target_lang, semaphore)
-        for index, segment in enumerate(segments)
-        if segment.get("text", "").strip()
+        for index, segment in indexed_segments
     ]
 
     if not tasks:
@@ -524,6 +529,23 @@ async def generate_dubbing_audio(segments: list, voice: str,
         f"Generating {len(tasks)} TTS segments concurrently (limit={TTS_CONCURRENCY})"
     )
     results = await asyncio.gather(*tasks)
+    # Let the provider recover, then retry only failed cues sequentially.
+    # Keep successful audio and its original index; never substitute a voice.
+    for recovery_round in range(TTS_RECOVERY_ROUNDS):
+        pending = [position for position, result in enumerate(results) if result is None]
+        if not pending:
+            break
+        delay = TTS_RECOVERY_DELAY_SECONDS * (recovery_round + 1)
+        logger.warning(
+            "Retrying %d failed TTS cues with voice %s sequentially after %ss (round %d/%d)",
+            len(pending), voice, delay, recovery_round + 1, TTS_RECOVERY_ROUNDS,
+        )
+        await asyncio.sleep(delay)
+        for position in pending:
+            index, segment = indexed_segments[position]
+            results[position] = await _generate_segment_audio(
+                index, segment, voice, output_dir, rate, target_lang, semaphore,
+            )
     failed = sum(result is None for result in results)
     if failed:
         raise RuntimeError(

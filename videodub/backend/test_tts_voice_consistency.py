@@ -29,12 +29,29 @@ class VoiceConsistencyTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_cue_rejects_batch(self):
         segments = [{'start': i, 'end': i + 1, 'text': str(i)} for i in range(3)]
         with tempfile.TemporaryDirectory() as directory, \
-             patch.object(tts, 'text_to_speech_edge', new_callable=AsyncMock) as edge:
-            edge.side_effect = ['ok', RuntimeError('unavailable'), 'ok']
+             patch.object(tts, 'text_to_speech_edge', new_callable=AsyncMock) as edge, \
+             patch.object(tts.asyncio, 'sleep', new_callable=AsyncMock):
+            edge.side_effect = ['ok', RuntimeError('unavailable'), 'ok', RuntimeError('unavailable'), RuntimeError('unavailable')]
             with self.assertRaisesRegex(RuntimeError, '1/3'):
                 await tts.generate_dubbing_audio(segments, 'vi-VN-NamMinhNeural', directory)
-            self.assertEqual(edge.await_count, 3)
+            self.assertEqual(edge.await_count, 5)
             self.assertTrue(all(call.args[1] == 'vi-VN-NamMinhNeural' for call in edge.await_args_list))
+
+    async def test_recovery_retries_only_failed_cue_and_preserves_indices(self):
+        segments = [
+            {'start': 0, 'end': 1, 'text': 'First'},
+            {'start': 1, 'end': 2, 'text': ''},
+            {'start': 2, 'end': 3, 'text': 'Second'},
+        ]
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(tts, 'text_to_speech_edge', new_callable=AsyncMock) as edge, \
+             patch.object(tts.asyncio, 'sleep', new_callable=AsyncMock) as sleep:
+            edge.side_effect = ['ok', RuntimeError('No audio was received'), 'ok']
+            results = await tts.generate_dubbing_audio(segments, 'vi-VN-NamMinhNeural', directory, '+20%')
+            self.assertEqual([result['index'] for result in results], [0, 2])
+            self.assertEqual([call.args[0] for call in edge.await_args_list], ['First', 'Second', 'Second'])
+            self.assertTrue(all(call.args[1] == 'vi-VN-NamMinhNeural' and call.args[3] == '+20%' for call in edge.await_args_list))
+            sleep.assert_awaited_once_with(tts.TTS_RECOVERY_DELAY_SECONDS)
 
     async def test_success_preserves_voice_order_and_rate(self):
         segments = [{'start': i, 'end': i + 1, 'text': str(i)} for i in range(3)]

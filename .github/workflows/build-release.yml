@@ -8,14 +8,17 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Phiên bản (ví dụ: 1.0.0)"
+        description: "Phiên bản (ví dụ: 1.0.0). Bỏ trống nếu push tag v*."
         required: false
-        default: "manual"
+        default: ""
 
 permissions:
   contents: write
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # 1) Build Windows onedir, zip bằng PowerShell (có sẵn, không cần 7z).
+  # ---------------------------------------------------------------------------
   build-windows:
     runs-on: windows-latest
     timeout-minutes: 60
@@ -50,37 +53,25 @@ jobs:
           cd videodub
           desktop\build.bat
 
-      - name: Prepare Windows artifact
-        shell: bash
+      - name: Zip Windows artifact (PowerShell)
+        shell: pwsh
         run: |
-          cd videodub/desktop/dist
-          7z.exe a -t zip ../VideoDub-windows.zip VideoDub
+          Compress-Archive `
+            -Path videodub/desktop/dist/VideoDub `
+            -DestinationPath videodub/desktop/dist/VideoDub-windows.zip `
+            -Force
 
-      - name: Upload Windows to GitHub Release
-        uses: softprops/action-gh-release@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ github.event.inputs.version || github.ref_name }}
-          name: VideoDub ${{ github.event.inputs.version || github.ref_name }}
-          files: videodub/desktop/dist/VideoDub-windows.zip
-          body: |
-            ## VideoDub Desktop (Windows)
-            - Portable `.exe` — không cần cài đặt
-            - Dữ liệu lưu tại `%LOCALAPPDATA%\VideoDub\`
-            - Yêu cầu: Windows 10/11, WebView2 Runtime (có sẵn trên Win 10/11)
+          name: windows-zip
+          path: videodub/desktop/dist/VideoDub-windows.zip
+          if-no-files-found: error
+          retention-days: 7
 
-            ### Cách dùng
-            ```bat
-            # 1. Giải nén file zip
-            # 2. Double-click VideoDub.exe
-            ```
-
-            ### Hỗ trợ
-            - Backend API: http://localhost:8000
-            - API Docs: http://localhost:8000/docs
-            - Xem chi tiết: videodub/desktop/README.md
-
+  # ---------------------------------------------------------------------------
+  # 2) Build macOS .app, zip bằng `ditto` (preserve bundle metadata).
+  # ---------------------------------------------------------------------------
   build-macos:
     runs-on: macos-latest
     timeout-minutes: 60
@@ -100,51 +91,153 @@ jobs:
           cache: "npm"
           cache-dependency-path: "videodub/frontend/package-lock.json"
 
-      - name: Install FFmpeg (Homebrew)
-        run: brew install ffmpeg
-
-      - name: Install Xcode Command Line Tools
+      - name: Verify Xcode Command Line Tools
         run: |
           if ! xcode-select -p &>/dev/null; then
-            xcode-select --install
-            # Wait for install to complete (up to 5 minutes)
-            while ! xcode-select -p &>/dev/null; do sleep 10; done
+            echo "::error::Xcode Command Line Tools not found. macos-latest runners should have it pre-installed."
+            exit 1
           fi
-          sudo xcode-select --switch /Library/Developer/CommandLineTools
+          echo "Xcode CLT: $(xcode-select -p)"
+
+      - name: Install FFmpeg (Homebrew)
+        run: brew install ffmpeg
 
       - name: Build macOS Desktop
         run: |
           chmod +x videodub/desktop/build_macos.sh
           ./videodub/desktop/build_macos.sh
 
-      - name: Prepare macOS artifact
-        shell: bash
+      - name: Zip macOS artifact (ditto)
         run: |
-          cd videodub/desktop/dist
-          zip -r ../VideoDub-macos.zip VideoDub.app
+          ditto -c -k --sequesterRsrc --keepParent \
+            videodub/desktop/dist/VideoDub.app \
+            videodub/desktop/dist/VideoDub-macos.zip
 
-      - name: Upload macOS to GitHub Release
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-zip
+          path: videodub/desktop/dist/VideoDub-macos.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 3) Tạo GitHub Release 1 lần duy nhất với cả 2 file zip.
+  #    Chạy trên ubuntu (rẻ hơn, không cần Windows/macOS runner).
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-zip
+          path: artifacts/
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-zip
+          path: artifacts/
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ github.event.inputs.version || github.ref_name }}
           name: VideoDub ${{ github.event.inputs.version || github.ref_name }}
-          files: videodub/desktop/dist/VideoDub-macos.zip
+          files: |
+            artifacts/VideoDub-windows.zip
+            artifacts/VideoDub-macos.zip
+          generate_release_notes: true
           body: |
-            ## VideoDub Desktop (macOS)
-            - Native `.app` bundle — không cần cài đặt
-            - Dữ liệu lưu tại `~/.local/share/VideoDub/`
-            - Yêu cầu: macOS 12+, Python 3.11+, Node.js 20+
+            ## VideoDub Desktop
 
-            ### Cách dùng
-            ```bash
-            # 1. Giải nén file zip
-            # 2. Chuột phải → Open (lần đầu để vượt Gatekeeper)
-            # 3. Chuyển vào Applications
-            ```
+            Tải bản phù hợp với hệ điều hành của bạn:
 
-            ### Hỗ trợ
-            - Backend API: http://localhost:8000
-            - API Docs: http://localhost:8000/docs
-            - Xem chi tiết: videodub/desktop/README_desktop_macos.md
+            | Nền tảng | File | Yêu cầu |
+            |----------|------|---------|
+            | 🪟 **Windows** | `VideoDub-windows.zip` | Windows 10/11 + WebView2 Runtime |
+            | 🍎 **macOS** | `VideoDub-macos.zip` | macOS 12+ (Monterey) |
+
+            ### Cài đặt
+
+            **Windows**:
+            1. Giải nén `VideoDub-windows.zip`
+            2. Double-click `VideoDub.exe`
+            3. Dữ liệu lưu tại `%LOCALAPPDATA%\VideoDub\`
+
+            **macOS**:
+            1. Giải nén `VideoDub-macos.zip`
+            2. **Lần đầu**: chuột phải `VideoDub.app` → **Open** để vượt Gatekeeper (chưa notarize)
+            3. Sau đó kéo vào `/Applications`
+            4. Dữ liệu lưu tại `~/.local/share/VideoDub/`
+
+            ### Backend API (chỉ dev)
+            - API: http://localhost:8000
+            - Docs: http://localhost:8000/docs
+
+            Xem chi tiết build & troubleshooting:
+            - [videodub/desktop/README.md](videodub/desktop/README.md)
+            - [videodub/desktop/README_desktop_macos.md](videodub/desktop/README_desktop_macos.md)
+
+  # ---------------------------------------------------------------------------
+  # 4) Auto-bump link download trong README.md ở root.
+  #    Chỉ chạy khi push tag (workflow_dispatch không có github.ref_name).
+  # ---------------------------------------------------------------------------
+  update-readme:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Cần lịch sử đầy đủ để push lại nếu cần.
+          fetch-depth: 0
+
+      - name: Bump download links in README
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          RELEASE_URL="https://github.com/${REPO}/releases/tag/${TAG}"
+
+          if [ ! -f README.md ]; then
+            echo "::error::README.md not found at repo root."
+            exit 1
+          fi
+
+          # Replace 2 placeholder. Dùng delimiter | để tránh xung đột với URL có /.
+          sed -i.bak \
+            -e "s|<!-- LATEST_VERSION -->|${TAG}|g" \
+            -e "s|<!-- LATEST_RELEASE_URL -->|${RELEASE_URL}|g" \
+            README.md
+          rm -f README.md.bak
+
+          echo "----- Diff after bump -----"
+          git diff -- README.md || true
+          echo "---------------------------"
+
+          if git diff --quiet -- README.md; then
+            echo "No changes — already up to date."
+            exit 0
+          fi
+
+      - name: Commit bumped README
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs: bump download links to ${TAG}"
+          git push

@@ -22,6 +22,8 @@ hiddenimports = []
 # especially for webview, Whisper and Demucs.
 for package in (
     "webview",
+    "yt_dlp",
+    "curl_cffi",
     "fastapi",
     "starlette",
     "uvicorn",

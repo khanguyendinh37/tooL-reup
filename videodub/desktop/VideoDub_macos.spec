@@ -22,6 +22,8 @@ hiddenimports = []
 # These libraries use dynamic imports or package data at runtime.
 for package in (
     "webview",
+    "yt_dlp",
+    "curl_cffi",
     "fastapi",
     "starlette",
     "uvicorn",

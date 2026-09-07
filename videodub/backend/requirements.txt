@@ -9,7 +9,7 @@ python-multipart==0.0.9
 websockets>=13.0
 
 # Video processing
-yt-dlp>=2025.1.1
+yt-dlp>=2026.8.19
 # Browser TLS impersonation required by Facebook and Instagram downloads.
 curl_cffi>=0.15.0,<0.17.0
 pytubefix>=8.12.0

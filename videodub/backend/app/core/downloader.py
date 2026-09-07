@@ -73,36 +73,21 @@ def _check_curl_cffi_compatibility():
 
 
 def _build_impersonate_target(platform: str):
-    """Return the first available impersonate target string for yt-dlp, or None if unavailable.
-
-    Tries specific version targets first. Falls back gracefully when targets
-    are not compiled into the curl_cffi binary.
-    """
+    """Select an actual target from the installed curl request handler."""
     if platform not in _IMPERSONATE_TARGETS:
         return None
-    target_list = _IMPERSONATE_TARGETS[platform]
     try:
-        from yt_dlp.networking.impersonate import ImpersonateTarget
-        supported_map = getattr(ImpersonateTarget, '_SUPPORTED_IMPERSONATE_TARGET_MAP', {})
-        if not supported_map:
-            # No supported targets available
-            logger.warning(
-                f"Impersonation targets not available. "
-                f"If curl_cffi is installed but incompatible with yt-dlp, "
-                f"try: pip install 'yt-dlp[default,curl_cffi]'"
-            )
-            return None
-        # Find first available target from the list
-        for target in target_list:
-            if target in supported_map:
-                return target
-        # None of our preferred targets available
-        return None
-    except ImportError as e:
-        logger.warning(f"Impersonate module not available (curl_cffi may not be installed): {e}")
-        return None
-    except Exception as e:
-        logger.debug(f"Could not build impersonate target for {platform}: {e}")
+        from yt_dlp.networking._curlcffi import CurlCFFIRH
+        targets = list(CurlCFFIRH.supported_targets)
+        for preferred in _IMPERSONATE_TARGETS[platform]:
+            for target in targets:
+                if str(target) == preferred:
+                    return target
+        # Versions evolve: prefer any supported Chrome desktop target.
+        return next((target for target in targets if target.client == "chrome"),
+                    targets[0] if targets else None)
+    except (ImportError, OSError) as exc:
+        logger.warning("Browser impersonation unavailable: %s", exc)
         return None
 
 
@@ -1518,20 +1503,9 @@ def get_platform_ydl_opts(url: str, video_id: str, output_dir: str, cookies_file
         )
 
     # Add impersonation target for platforms that need it (bypasses IP blocks / bot detection).
-    # yt-dlp accepts impersonate as a string like "chrome-120:windows-10"
+    # The Python API requires an ImpersonateTarget object, not a CLI string.
     if "impersonate" in config and config["impersonate"]:
         target_str = _build_impersonate_target(platform)
-        # For Facebook: force generic "chrome" target which works best with curl_cffi
-        if platform == "facebook" and target_str is None:
-            # Try generic chrome as last resort
-            try:
-                from yt_dlp.networking.impersonate import ImpersonateTarget
-                supported_map = getattr(ImpersonateTarget, '_SUPPORTED_IMPERSONATE_TARGET_MAP', {})
-                if "chrome" in supported_map:
-                    target_str = "chrome"
-                    logger.info("Using generic 'chrome' impersonation for Facebook (fallback)")
-            except Exception:
-                pass
         if target_str:
             ydl_opts["impersonate"] = target_str
             logger.info(f"Impersonating {platform} as {target_str} to bypass bot detection")

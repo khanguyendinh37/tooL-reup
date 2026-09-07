@@ -8,18 +8,18 @@ VideoDub là công cụ lồng tiếng video tự động sử dụng AI: tải 
 
 ## 📥 Tải xuống Desktop
 
-Phiên bản mới nhất: **<!-- LATEST_VERSION -->** — [xem chi tiết & changelog](<!-- LATEST_RELEASE_URL -->)
+[Xem phiên bản mới nhất và changelog](https://github.com/khanguyendinh37/tooL-reup/releases/latest)
 
 | Nền tảng | Tải xuống | Yêu cầu |
 |----------|-----------|---------|
-| 🪟 **Windows** | [VideoDub-windows.zip](<!-- LATEST_RELEASE_URL -->/download/VideoDub-windows.zip) | Windows 10/11 + WebView2 Runtime (có sẵn) |
-| 🍎 **macOS** | [VideoDub-macos.zip](<!-- LATEST_RELEASE_URL -->/download/VideoDub-macos.zip) | macOS 12+ (Monterey), chưa notarize |
+| 🪟 **Windows** | [Tải VideoDub-windows.zip](https://github.com/khanguyendinh37/tooL-reup/releases/latest/download/VideoDub-windows.zip) | Windows 10/11 + WebView2 Runtime (có sẵn) |
+| 🍎 **macOS** | [Tải VideoDub-macos.zip](https://github.com/khanguyendinh37/tooL-reup/releases/latest/download/VideoDub-macos.zip) | macOS 12+ (Monterey), chưa notarize |
 
 > **Cài nhanh**:
 > - **Windows**: giải nén → double-click `VideoDub.exe` → xong.
 > - **macOS**: giải nén → chuột phải `VideoDub.app` → **Open** (lần đầu để vượt Gatekeeper) → kéo vào Applications.
 
-> Các marker `<!-- LATEST_VERSION -->` và `<!-- LATEST_RELEASE_URL -->` được CI tự động cập nhật khi push tag `v*`. Nếu link chưa có, vào tab [Releases](../../releases) để tải thủ công.
+> Các link trên tải bản Release chính thức mới nhất. Nếu chưa có bản phát hành, vào [Actions](https://github.com/khanguyendinh37/tooL-reup/actions/workflows/build-release.yml) → chọn lượt build thành công → **Artifacts** để tải bản build, hoặc xem [tất cả Releases](https://github.com/khanguyendinh37/tooL-reup/releases).
 
 ---
 

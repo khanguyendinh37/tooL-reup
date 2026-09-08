@@ -9,10 +9,10 @@ python-multipart==0.0.9
 websockets>=13.0
 
 # Video processing
-yt-dlp>=2026.8.19
+yt-dlp==2026.8.19
 # Browser TLS impersonation required by Facebook and Instagram downloads.
-curl_cffi>=0.15.0,<0.17.0
-pytubefix>=8.12.0
+curl_cffi==0.16.2
+pytubefix==10.10.1
 ffmpeg-python==0.2.0
 
 # HTTP clients for Douyin API
@@ -20,6 +20,11 @@ aiohttp>=3.9.0
 aiofiles>=24.1.0
 requests>=2.31.0
 faster-whisper==1.0.3
+# Keep native inference/audio runtimes aligned with the tested source environment.
+ctranslate2==4.8.1
+av==12.3.0
+numpy==2.4.6
+torch==2.13.0
 
 # Brotli for Douyin API decompression
 brotli>=1.1.0
@@ -28,12 +33,12 @@ brotli>=1.1.0
 # urllib is part of Python standard library; no provider SDK/API dependency is required.
 
 # TTS (Edge TTS - supports voice selection like Nam Minh, Hoài My, etc.)
-edge-tts>=6.1.9
+edge-tts==7.2.8
 # Network fallback when Edge TTS is unavailable or rate-limited.
 gTTS>=2.5.4
 
 # Vocal removal
-demucs>=4.0.1
+demucs==4.1.0
 
 # Utilities
 python-dotenv==1.0.1

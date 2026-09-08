@@ -20,10 +20,10 @@ echo ""
 #    build against Python 3.14+ on recent GitHub Actions runners.
 echo "[1/6] Checking Python..."
 PYTHON_BIN=""
-for candidate in python3.11 python3.12 python3.13 python3; do
+for candidate in python3.11 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
         CAND_VERSION=$("$candidate" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-        if [ "$CAND_VERSION" = "3.11" ] || [ "$CAND_VERSION" = "3.12" ] || [ "$CAND_VERSION" = "3.13" ]; then
+        if [ "$CAND_VERSION" = "3.11" ]; then
             PYTHON_BIN="$candidate"
             PYTHON_VERSION="$CAND_VERSION"
             break
@@ -31,7 +31,7 @@ for candidate in python3.11 python3.12 python3.13 python3; do
     fi
 done
 if [ -z "$PYTHON_BIN" ]; then
-    echo "[ERROR] No compatible Python (3.11-3.13) found."
+    echo "[ERROR] Python 3.11 is required to match the desktop release."
     echo "        Install: brew install python@3.11"
     exit 1
 fi
@@ -55,7 +55,9 @@ if [ ! -d "$VENV_DIR" ]; then
     "$PYTHON_BIN" -m venv "$VENV_DIR"
 fi
 "$VENV_DIR/bin/python" -m pip install --upgrade pip
+"$VENV_DIR/bin/python" -c 'import sys; sys.exit(sys.version_info[:2] != (3, 11))'
 "$VENV_DIR/bin/python" -m pip install -r "$DESKTOP_DIR/requirements.txt"
+"$VENV_DIR/bin/python" -m pip check
 
 # 4. FFmpeg
 echo "[4/6] Preparing FFmpeg..."
@@ -73,9 +75,7 @@ echo "       FFmpeg copied to $FFMPEG_DIR"
 # 5. Frontend build
 echo "[5/6] Building frontend..."
 cd "$FRONTEND_DIR"
-if [ ! -d "node_modules" ]; then
-    npm ci
-fi
+npm ci
 npm run build
 cd "$ROOT"
 

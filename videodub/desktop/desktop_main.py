@@ -83,6 +83,64 @@ def _prepare_runtime() -> tuple[Path, Path]:
     return backend_root, frontend_dist
 
 
+if '--demucs-worker' in sys.argv:
+    # Windowed executables have no console streams, but Demucs uses print/tqdm.
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, 'w')
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, 'w')
+    _prepare_runtime()
+    from demucs.separate import main as demucs_main
+    try:
+        demucs_main(sys.argv[sys.argv.index('--demucs-worker') + 1:])
+    except Exception:
+        logging.exception('Bundled Demucs worker failed')
+        raise SystemExit(1)
+    finally:
+        logging.shutdown()
+    raise SystemExit(0)
+
+if '--pipeline-check' in sys.argv:
+    import asyncio
+    argument_index = sys.argv.index('--pipeline-check')
+    check_url, check_data, check_report = sys.argv[argument_index + 1:argument_index + 4]
+    check_root = Path(check_data).resolve()
+    # Refuse to run a test over the user's database or an earlier test job.
+    if (check_root / 'videodub.db').exists():
+        raise RuntimeError('Pipeline check requires a fresh isolated data directory')
+    os.environ['VIDEODUB_DATA_DIR'] = str(check_root)
+    os.environ['DATABASE_URL'] = f"sqlite+aiosqlite:///{check_root.as_posix()}/videodub.db"
+    _prepare_runtime()
+    from app.core.pipeline_check import run as run_pipeline_check
+    check_exit = 0
+    try:
+        asyncio.run(run_pipeline_check(check_url, check_report))
+    except Exception:
+        logging.exception('Pipeline check failed')
+        check_exit = 1
+    finally:
+        logging.shutdown()
+    raise SystemExit(check_exit)
+
+if '--self-test' in sys.argv:
+    # Must run before importing app.main, which opens user storage.
+    import tempfile
+    check_exit = 0
+    with tempfile.TemporaryDirectory(prefix='videodub-self-test-') as check_dir:
+        os.environ['VIDEODUB_DATA_DIR'] = check_dir
+        os.environ['DATABASE_URL'] = f"sqlite+aiosqlite:///{Path(check_dir).as_posix()}/videodub.db"
+        try:
+            _prepare_runtime()
+            from app.core.runtime_check import run_checks
+            run_checks(sys.argv[sys.argv.index('--self-test') + 1])
+        except Exception:
+            logging.exception('Runtime check failed')
+            check_exit = 1
+        finally:
+            # Windows cannot remove the temporary directory while its log is open.
+            logging.shutdown()
+    raise SystemExit(check_exit)
+
 _backend_root_path, _frontend_dist_path = _prepare_runtime()
 
 # Imports intentionally happen after environment and sys.path preparation so

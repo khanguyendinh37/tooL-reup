@@ -2,10 +2,17 @@ import subprocess
 import os
 import shutil
 import logging
+import sys
 
 from app.core.process_utils import hidden_subprocess_kwargs
 
 logger = logging.getLogger(__name__)
+
+
+def demucs_command(arguments: list[str]) -> list[str]:
+    if getattr(sys, 'frozen', False):
+        return [sys.executable, '--demucs-worker', *arguments]
+    return [sys.executable, '-m', 'demucs.separate', *arguments]
 
 
 def separate_vocals(video_path: str, output_dir: str) -> dict:
@@ -34,7 +41,7 @@ def separate_vocals(video_path: str, output_dir: str) -> dict:
     try:
         # Run Demucs for vocal separation
         result = subprocess.run(
-            ["demucs", "--two-stems", "vocals", "-o", separated_dir, audio_path],
+            demucs_command(["--two-stems", "vocals", "-o", separated_dir, audio_path]),
             capture_output=True, text=True, timeout=600, **hidden_subprocess_kwargs()
         )
 

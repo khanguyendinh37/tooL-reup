@@ -24,7 +24,7 @@ if not exist "%VPY%" (
     echo [1/6] Tao backend virtualenv...
     rem Prefer the Python 3.11 interpreter installed by setup-python.
     set "PY_BIN=py -3.11"
-    python -c "import sys; sys.exit(sys.version_info[:2] != (3, 11))" >nul 2>&1
+    call python -c "import sys; sys.exit(not (sys.version_info[:2] == (3, 11)))" >nul 2>&1
     if not errorlevel 1 set "PY_BIN=python"
     !PY_BIN! -m venv "%VENV%"
     if errorlevel 1 (
@@ -36,19 +36,17 @@ if not exist "%VPY%" (
     echo [1/6] Tai su dung backend virtualenv.
 )
 
-if not exist "%FRONTEND%\node_modules" (
-    echo [2/6] Cai frontend dependencies...
-    pushd "%FRONTEND%"
-    call npm ci
-    if errorlevel 1 (
-        popd
-        echo [ERROR] npm ci that bai.
-        exit /b 1
-    )
+echo [2/6] Sync frontend from package-lock.json...
+"%VPY%" -c "import sys; sys.exit(not (sys.version_info[:2] == (3, 11)))"
+if errorlevel 1 exit /b 1
+pushd "%FRONTEND%"
+call npm ci
+if errorlevel 1 (
     popd
-) else (
-    echo [2/6] Frontend dependencies da co.
+    echo [ERROR] npm ci failed.
+    exit /b 1
 )
+popd
 
 echo [3/6] Build frontend production...
 pushd "%FRONTEND%"
@@ -68,6 +66,9 @@ if errorlevel 1 (
     echo [ERROR] Cai Python dependencies that bai.
     exit /b 1
 )
+
+"%VPY%" -m pip check
+if errorlevel 1 exit /b 1
 
 if not exist "%FFMPEG_DIR%" mkdir "%FFMPEG_DIR%"
 

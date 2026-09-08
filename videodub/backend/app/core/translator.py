@@ -805,7 +805,7 @@ def translate_srt_deep_translator(
     preventing line shifts or partial translations from corrupting SRT timing.
     When the full pass (or a later AI block) fails, translation degrades to the
     contextual groups of the Google route, then smaller blocks, then neighbor
-    context, then the original cue text.
+    context, then fail explicitly if meaningful cues are still unresolved.
     """
     entries = parse_srt(srt_path)
     if not entries:
@@ -915,9 +915,17 @@ def translate_srt_deep_translator(
         if translated:
             translated_indices.add(index)
         else:
-            logger.warning("Keeping original text for subtitle entry %s", index + 1)
+            logger.warning("Translation unresolved for subtitle entry %s", index + 1)
 
-    # Empty cues are preserved, and any unexpected unresolved cue is safe.
+    unresolved = [index for index in translatable_indices if index not in translated_indices]
+    if unresolved:
+        raise RuntimeError(
+            f"Không dịch được {len(unresolved)}/{len(translatable_indices)} câu sang {target}. "
+            "Dịch vụ dịch không trả kết quả đầy đủ. Hãy thử lại hoặc kiểm tra cấu hình dịch; "
+            "hệ thống chưa tạo giọng đọc để tránh đọc nhầm ngôn ngữ gốc."
+        )
+
+    # Preserve empty cues after every meaningful cue has been translated.
     for index, entry in enumerate(entries):
         if not entry.get("translated_text"):
             entry["translated_text"] = _clean_subtitle_text(entry.get("original_text", ""))
@@ -937,16 +945,6 @@ def translate_srt_deep_translator(
         unchanged_count,
         len(entries),
     )
-    if source != target and len(translated_indices) < translatable_count:
-        missing = translatable_count - len(translated_indices)
-        logger.warning(
-            "Translation incomplete: %d/%d cues translated; %d cues kept as original text "
-            "(AI/Google provider was rate-limited). The job will still finish so the "
-            "user gets a watchable video; those few cues will show the source language.",
-            len(translated_indices),
-            translatable_count,
-            missing,
-        )
     write_tts_srt(entries, output_path)
     return output_path
 

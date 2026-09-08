@@ -92,6 +92,8 @@ cookies/
 videodub/desktop/vendor/
 videodub/desktop/build/
 videodub/desktop/dist/
+videodub/desktop/build-parity/
+videodub/desktop/dist-parity/
 
 # OS
 Thumbs.db

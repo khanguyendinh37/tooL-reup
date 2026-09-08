@@ -8,7 +8,7 @@ echo.
 REM ----------------------------------------
 REM Preflight: check Python and Node
 REM ----------------------------------------
-python --version >nul 2>&1
+call python --version >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Python not found in PATH. Install from https://python.org then re-run.
     pause
@@ -29,6 +29,7 @@ REM    install once with quoted specs and never re-download.
 REM ----------------------------------------
 set "ROOT=%~dp0"
 set "BACKEND=%ROOT%backend"
+if exist "%ROOT%desktop\vendor\ffmpeg\ffmpeg.exe" set "PATH=%ROOT%desktop\vendor\ffmpeg;%PATH%"
 set "VENV=%BACKEND%\.venv"
 
 REM Use the same persistent settings as the desktop build unless overridden.
@@ -42,7 +43,7 @@ echo [1/4] Preparing backend virtualenv...
 if not exist "%VENV%\Scripts\python.exe" (
     echo     Creating venv at "%VENV%" ...
     pushd "%BACKEND%"
-    python -m venv .venv
+    call python -m venv .venv
     if errorlevel 1 (
         echo [ERROR] Failed to create virtualenv.
         popd
@@ -57,6 +58,12 @@ if not exist "%VENV%\Scripts\python.exe" (
 REM Use venv's pip/python for install
 set "VPY=%VENV%\Scripts\python.exe"
 set "VPIP=%VENV%\Scripts\pip.exe"
+"%VPY%" -c "import sys; sys.exit(not (sys.version_info[:2] == (3, 11)))"
+if errorlevel 1 (
+    echo [ERROR] VideoDub requires Python 3.11, matching the desktop build.
+    pause
+    exit /b 1
+)
 
 REM ----------------------------------------
 REM [2/4] Sync backend deps
@@ -75,18 +82,13 @@ echo [2/4] Syncing backend dependencies...
 if "!NEED_INSTALL!"=="1" (
     echo     Installing requirements into venv...
     "%VPIP%" install --upgrade pip
-    REM  Install each line separately so quoted "pkg>=x" specs survive cmd parsing.
-    for /f "usebackq eol=# tokens=*" %%L in ("%BACKEND%\requirements.txt") do (
-        set "LINE=%%L"
-        if not "!LINE!"=="" (
-            "%VPIP%" install "!LINE!"
-            if errorlevel 1 (
-                echo [ERROR] Failed to install: !LINE!
-                pause
-                exit /b 1
-            )
-        )
+    "%VPY%" -m pip install -r "%BACKEND%\requirements.txt"
+    if errorlevel 1 (
+        echo [ERROR] Dependency sync failed.
+        exit /b 1
     )
+    "%VPY%" -m pip check
+    if errorlevel 1 exit /b 1
     for /f "delims=" %%H in ('certutil -hashfile "%BACKEND%\requirements.txt" SHA1 ^| findstr /r "^[0-9a-f]"') do echo %%H> "%MARKER%"
     echo     Backend deps synced.
 ) else (
@@ -95,7 +97,7 @@ if "!NEED_INSTALL!"=="1" (
 
 REM ----------------------------------------
 REM [3/4] Sync frontend deps
-REM    Idempotent: npm install only when node_modules missing or package-lock changed.
+REM    Idempotent: npm ci only when node_modules missing or package-lock changed.
 REM ----------------------------------------
 set "FRONTEND=%ROOT%frontend"
 set "FMARKER=%FRONTEND%\node_modules\.deps_installed"
@@ -113,9 +115,9 @@ if exist "%FRONTEND%\node_modules" (
 echo [3/4] Syncing frontend dependencies...
 if "!FNEED_INSTALL!"=="1" (
     pushd "%FRONTEND%"
-    call npm install
+    call npm ci
     if errorlevel 1 (
-        echo [ERROR] npm install failed.
+        echo [ERROR] npm ci failed.
         popd
         pause
         exit /b 1

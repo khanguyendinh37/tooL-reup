@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PyInstaller.building.build_main import Analysis, COLLECT, EXE, PYZ
 from PyInstaller.building.osx import BUNDLE
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, copy_metadata
 
 
 ROOT = Path(SPEC).resolve().parents[1]
@@ -37,8 +37,8 @@ for package in (
 ):
     try:
         package_datas, package_binaries, package_hiddenimports = collect_all(package)
-    except Exception:
-        continue
+    except Exception as exc:
+        raise RuntimeError(f"Cannot package required dependency {package}") from exc
     datas.extend(package_datas)
     binaries.extend(package_binaries)
     hiddenimports.extend(package_hiddenimports)
@@ -48,6 +48,10 @@ for executable in ("ffmpeg", "ffprobe"):
     executable_path = FFMPEG_DIR / executable
     if executable_path.is_file():
         binaries.append((str(executable_path), "ffmpeg"))
+
+for distribution in ('yt-dlp', 'curl_cffi', 'pytubefix', 'edge-tts',
+                     'faster-whisper', 'ctranslate2', 'av', 'demucs', 'torch', 'numpy', 'fastapi'):
+    datas.extend(copy_metadata(distribution))
 
 icon_path = ROOT / "desktop" / "VideoDub.icns"
 

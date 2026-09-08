@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where.exe python *)",
+      "Bash(where.exe python3.11)",
+      "Bash(where.exe py *)",
+      "Bash(where.exe node *)",
+      "Bash(where.exe ffmpeg *)",
+      "Bash(where.exe ffprobe *)"
+    ]
+  }
+}

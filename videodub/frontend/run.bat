@@ -20,9 +20,9 @@ echo Backend API proxied to: http://localhost:8000
 echo.
 echo Press Ctrl+C to stop the server
 echo ========================================
-call npm install
+call npm ci
 if %errorlevel% neq 0 (
-    echo Error: npm install failed!
+    echo Error: npm ci failed!
     pause
     exit /b 1
 )

@@ -54,6 +54,25 @@ jobs:
         run: |
           call desktop\build.bat
 
+      - name: Verify source and packaged Windows runtime
+        shell: pwsh
+        run: |
+          $env:PATH = "$pwd\videodub\desktop\vendor\ffmpeg;" + $env:PATH
+          $env:VIDEODUB_DATA_DIR = "$env:RUNNER_TEMP\videodub-check"
+          $env:PYTHONPATH = "$pwd\videodub\backend"
+          & videodub/backend/.venv/Scripts/python.exe -m app.core.runtime_check source-runtime.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & videodub/backend/.venv/Scripts/python.exe videodub/desktop/verify_build.py videodub/desktop/dist/VideoDub/VideoDub.exe source-runtime.json frozen-runtime.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows runtime reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-runtime-reports
+          path: '*-runtime.json'
+          if-no-files-found: warn
+
       - name: Zip Windows artifact (PowerShell)
         shell: pwsh
         run: |
@@ -107,6 +126,22 @@ jobs:
         run: |
           chmod +x videodub/desktop/build_macos.sh
           ./videodub/desktop/build_macos.sh
+
+      - name: Verify source and packaged macOS runtime
+        run: |
+          export PATH="$PWD/videodub/desktop/vendor/ffmpeg:$PATH"
+          export VIDEODUB_DATA_DIR="$RUNNER_TEMP/videodub-check"
+          export PYTHONPATH="$PWD/videodub/backend"
+          videodub/backend/.venv/bin/python -m app.core.runtime_check source-runtime.json
+          videodub/backend/.venv/bin/python videodub/desktop/verify_build.py videodub/desktop/dist/VideoDub.app/Contents/MacOS/VideoDub source-runtime.json frozen-runtime.json
+
+      - name: Upload macOS runtime reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-runtime-reports
+          path: '*-runtime.json'
+          if-no-files-found: warn
 
       - name: Zip macOS artifact (ditto)
         run: |

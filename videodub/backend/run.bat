@@ -6,6 +6,7 @@ echo ========================================
 echo.
 
 set "ROOT=%~dp0.."
+if exist "%ROOT%\desktop\vendor\ffmpeg\ffmpeg.exe" set "PATH=%ROOT%\desktop\vendor\ffmpeg;%PATH%"
 set "VENV=%~dp0.venv"
 set "VPY=%VENV%\Scripts\python.exe"
 set "VPIP=%VENV%\Scripts\pip.exe"
@@ -20,7 +21,7 @@ call "%ROOT%\stop-local.bat" /quiet
 echo [1/2] Preparing backend virtualenv...
 if not exist "%VPY%" (
     echo     Creating venv at "%VENV%" ...
-    python -m venv "%VENV%"
+    call python -m venv "%VENV%"
     if errorlevel 1 (
         echo [ERROR] Failed to create virtualenv.
         pause
@@ -31,6 +32,12 @@ if not exist "%VPY%" (
 )
 
 REM Idempotent dependency sync: reinstall only when requirements.txt changed.
+"%VPY%" -c "import sys; sys.exit(not (sys.version_info[:2] == (3, 11)))"
+if errorlevel 1 (
+    echo [ERROR] VideoDub requires Python 3.11, matching the desktop build.
+    pause
+    exit /b 1
+)
 set "MARKER=%VENV%\.deps_installed"
 set "NEED_INSTALL=1"
 if exist "%MARKER%" (
@@ -43,17 +50,13 @@ echo [2/2] Syncing backend dependencies...
 if "!NEED_INSTALL!"=="1" (
     echo     Installing requirements into venv...
     "%VPIP%" install --upgrade pip
-    for /f "usebackq eol=# tokens=*" %%L in ("%~dp0requirements.txt") do (
-        set "LINE=%%L"
-        if not "!LINE!"=="" (
-            "%VPIP%" install "!LINE!"
-            if errorlevel 1 (
-                echo [ERROR] Failed to install: !LINE!
-                pause
-                exit /b 1
-            )
-        )
+    "%VPY%" -m pip install -r "%~dp0requirements.txt"
+    if errorlevel 1 (
+        echo [ERROR] Dependency sync failed.
+        exit /b 1
     )
+    "%VPY%" -m pip check
+    if errorlevel 1 exit /b 1
     for /f "delims=" %%H in ('certutil -hashfile "%~dp0requirements.txt" SHA1 ^| findstr /r "^[0-9a-f]"') do echo %%H> "%MARKER%"
     echo     Backend deps synced.
 ) else (

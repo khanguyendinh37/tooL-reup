@@ -6,11 +6,26 @@ from app.core.process_utils import hidden_subprocess_kwargs
 
 
 def extract_audio(video_path: str, output_path: str) -> str:
-    subprocess.run(
-        ["ffmpeg", "-i", video_path, "-vn", "-acodec", "pcm_s16le",
-         "-ar", "16000", "-ac", "1", output_path, "-y"],
-        capture_output=True, check=True, **hidden_subprocess_kwargs()
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+         "stream=index", "-of", "json", video_path],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        **hidden_subprocess_kwargs(),
     )
+    if probe.returncode == 0 and not json.loads(probe.stdout).get("streams"):
+        raise RuntimeError(
+            "Video đã tải không có luồng âm thanh nên không thể tạo phụ đề và lồng tiếng. "
+            "Hãy tải lại video thành tác vụ mới; thử lại bản xem trước cũ sẽ vẫn lỗi."
+        )
+    result = subprocess.run(
+        ["ffmpeg", "-i", video_path, "-map", "0:a:0", "-vn", "-acodec", "pcm_s16le",
+         "-ar", "16000", "-ac", "1", output_path, "-y"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        **hidden_subprocess_kwargs()
+    )
+    if result.returncode:
+        raise RuntimeError(f"Không tách được âm thanh từ video: {result.stderr[-2000:]}")
     return output_path
 
 

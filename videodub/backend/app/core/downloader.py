@@ -1196,9 +1196,9 @@ async def download_with_pytubefix(url: str, output_dir: str, video_id: str, prog
         # Try progressive streams first (format 18 works without PO token)
         stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
         if not stream:
-            stream = yt.streams.filter(file_extension='mp4').first()
-        if not stream:
-            stream = yt.streams.get_highest_resolution()
+            # Adaptive MP4 streams can contain video only. Let yt-dlp choose
+            # and merge separate video/audio instead of accepting silent input.
+            raise RuntimeError("YouTube không có MP4 chứa cả hình và tiếng; chuyển sang yt-dlp")
 
         output_path = os.path.join(output_dir, f"{video_id}.mp4")
         stream.download(output_path=output_dir, filename=f"{video_id}.mp4")

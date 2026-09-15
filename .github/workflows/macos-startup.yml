@@ -45,8 +45,21 @@ jobs:
         run: |
           mkdir -p diagnostics/crashes
           find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name 'VideoDub*' -type f -exec cp {} diagnostics/crashes/ \; 2>/dev/null || true
+      - name: Open app through macOS Launch Services
+        run: |
+          videodub/backend/.venv/bin/python videodub/desktop/verify_startup.py videodub/desktop/dist/VideoDub.app/Contents/MacOS/VideoDub diagnostics/finder --finder
+      - name: Collect Launch Services crash reports
+        if: always()
+        run: |
+          mkdir -p diagnostics/crashes
+          find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name 'VideoDub*' -type f -exec cp {} diagnostics/crashes/ \; 2>/dev/null || true
+      - name: Print startup diagnostics even when artifact storage is full
+        if: always()
+        run: |
+          find diagnostics -type f \( -name 'process.log' -o -name 'desktop.log' -o -name 'startup.json' -o -name 'runtime.json' \) -print -exec tail -n 120 {} \;
       - uses: actions/upload-artifact@v4
         if: always()
+        continue-on-error: true
         with:
           name: macos-startup-diagnostics
           path: diagnostics/

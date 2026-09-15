@@ -24,6 +24,8 @@ def run_checks(report_path: str) -> None:
             importlib.import_module(module)
         if getattr(sys, 'frozen', False) and sys.platform == 'win32':
             importlib.import_module('webview.platforms.winforms')
+        if sys.platform == 'darwin':
+            importlib.import_module('webview.platforms.cocoa')
         # Import the same API routes shipped in both modes.
         importlib.import_module('app.main')
         from app.core.downloader import _build_impersonate_target

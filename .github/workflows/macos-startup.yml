@@ -1,0 +1,58 @@
+name: macOS startup diagnostics
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/macos-startup-fix']
+permissions:
+  contents: read
+jobs:
+  apple-silicon:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: videodub/frontend/package-lock.json
+      - name: Record machine and install FFmpeg
+        run: |
+          mkdir -p diagnostics
+          sw_vers | tee diagnostics/system.txt
+          uname -m | tee -a diagnostics/system.txt
+          test "$(uname -m)" = arm64
+          brew install ffmpeg
+      - name: Build app
+        run: |
+          set -o pipefail
+          bash videodub/desktop/build_macos.sh 2>&1 | tee diagnostics/build.log
+      - name: Inspect app architecture and signing
+        run: |
+          file videodub/desktop/dist/VideoDub.app/Contents/MacOS/VideoDub | tee diagnostics/binary.txt
+          codesign --verify --deep --strict --verbose=2 videodub/desktop/dist/VideoDub.app 2>&1 | tee diagnostics/signature.txt
+      - name: Check packaged dependencies
+        run: |
+          videodub/desktop/dist/VideoDub.app/Contents/MacOS/VideoDub --self-test "$PWD/diagnostics/runtime.json"
+      - name: Open real native window and render frontend
+        run: |
+          videodub/backend/.venv/bin/python videodub/desktop/verify_startup.py videodub/desktop/dist/VideoDub.app/Contents/MacOS/VideoDub diagnostics/startup
+      - name: Collect OS crash reports
+        if: always()
+        run: |
+          mkdir -p diagnostics/crashes
+          find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 -name 'VideoDub*' -type f -exec cp {} diagnostics/crashes/ \; 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-startup-diagnostics
+          path: diagnostics/
+      - name: Package verified app
+        run: ditto -c -k --sequesterRsrc --keepParent videodub/desktop/dist/VideoDub.app VideoDub-macos-apple-silicon.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-apple-silicon-tested
+          path: VideoDub-macos-apple-silicon.zip

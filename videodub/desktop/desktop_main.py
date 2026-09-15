@@ -141,6 +141,15 @@ if '--self-test' in sys.argv:
             logging.shutdown()
     raise SystemExit(check_exit)
 
+_startup_report = None
+if '--startup-check' in sys.argv:
+    _startup_report = Path(sys.argv[sys.argv.index('--startup-check') + 1]).resolve()
+    _startup_report.parent.mkdir(parents=True, exist_ok=True)
+    # Dedicated data directory retained with CI logs; never open the user's DB.
+    _startup_data = _startup_report.parent / 'data'
+    os.environ['VIDEODUB_DATA_DIR'] = str(_startup_data)
+    os.environ['DATABASE_URL'] = f"sqlite+aiosqlite:///{(_startup_data / 'videodub.db').as_posix()}"
+
 _backend_root_path, _frontend_dist_path = _prepare_runtime()
 
 # Imports intentionally happen after environment and sys.path preparation so
@@ -232,7 +241,7 @@ def main() -> None:
 
     logger.info("VideoDub desktop started on http://127.0.0.1:%s", port)
     try:
-        webview.create_window(
+        window = webview.create_window(
             APP_NAME,
             f"http://127.0.0.1:{port}/",
             width=1440,
@@ -243,7 +252,11 @@ def main() -> None:
             background_color="#020617",
             js_api=DesktopApi(),
         )
-        webview.start(debug=False)
+        if _startup_report:
+            from startup_check import check_window
+            webview.start(check_window, args=(window, str(_startup_report)), debug=False)
+        else:
+            webview.start(debug=False)
         logger.info("VideoDub desktop window closed")
     except Exception:
         logger.exception("VideoDub desktop window failed to start")

@@ -4,7 +4,7 @@ on:
   push:
     branches: ['codex/macos-startup-fix']
 permissions:
-  contents: read
+  contents: write
 jobs:
   apple-silicon:
     runs-on: macos-15
@@ -67,6 +67,15 @@ jobs:
       - name: Package verified app
         run: ditto -c -k --sequesterRsrc --keepParent videodub/desktop/dist/VideoDub.app VideoDub-macos-apple-silicon.zip
       - uses: actions/upload-artifact@v4
+        id: app-upload
+        continue-on-error: true
         with:
           name: macos-apple-silicon-tested
           path: VideoDub-macos-apple-silicon.zip
+      - name: Save verified installer as a draft if artifact storage is full
+        if: success() && steps.app-upload.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s\n' 'Apple Silicon test build. Native window, React rendering and Launch Services checks passed on macOS 15. This is an unpublished draft, not the latest production release. Not notarized by Apple.' > diagnostics/release-notes.txt
+          gh release create "macos-check-${GITHUB_RUN_ID}" VideoDub-macos-apple-silicon.zip --draft --prerelease --target "$GITHUB_SHA" --title 'VideoDub macOS Apple Silicon - startup verified' --notes-file diagnostics/release-notes.txt

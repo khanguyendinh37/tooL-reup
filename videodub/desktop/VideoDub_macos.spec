@@ -28,6 +28,7 @@ for package in (
     "starlette",
     "uvicorn",
     "sqlalchemy",
+    "greenlet",
     "aiosqlite",
     "faster_whisper",
     "ctranslate2",

@@ -1,5 +1,6 @@
 """Offline checks shared by source and frozen builds. No user data is read."""
 import importlib
+import asyncio
 import importlib.metadata
 import json
 import platform
@@ -12,6 +13,20 @@ from app.core.process_utils import hidden_subprocess_kwargs
 
 PACKAGES = ('yt-dlp', 'curl_cffi', 'pytubefix', 'edge-tts', 'faster-whisper',
             'ctranslate2', 'av', 'demucs', 'torch', 'numpy', 'fastapi')
+
+
+async def check_async_database():
+    # Exercise the greenlet bridge used by init_db; importing SQLAlchemy alone
+    # succeeds even when its optional async dependency is missing on macOS ARM.
+    from sqlalchemy.ext.asyncio import create_async_engine
+    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
+    try:
+        async with engine.begin() as connection:
+            result = await connection.run_sync(lambda sync: sync.exec_driver_sql('SELECT 1').scalar())
+            if result != 1:
+                raise RuntimeError('Async database check failed')
+    finally:
+        await engine.dispose()
 
 
 def run_checks(report_path: str) -> None:
@@ -28,6 +43,8 @@ def run_checks(report_path: str) -> None:
             importlib.import_module('webview.platforms.cocoa')
         # Import the same API routes shipped in both modes.
         importlib.import_module('app.main')
+        asyncio.run(check_async_database())
+        report['checks']['async_database'] = 'ok'
         from app.core.downloader import _build_impersonate_target
         target = _build_impersonate_target('facebook')
         if target is None:

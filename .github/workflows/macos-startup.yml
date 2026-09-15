@@ -32,6 +32,7 @@ jobs:
           bash videodub/desktop/build_macos.sh 2>&1 | tee diagnostics/build.log
       - name: Inspect app architecture and signing
         run: |
+          set -o pipefail
           file videodub/desktop/dist/VideoDub.app/Contents/MacOS/VideoDub | tee diagnostics/binary.txt
           codesign --verify --deep --strict --verbose=2 videodub/desktop/dist/VideoDub.app 2>&1 | tee diagnostics/signature.txt
       - name: Check packaged dependencies

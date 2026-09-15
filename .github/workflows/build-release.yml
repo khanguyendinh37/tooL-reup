@@ -93,7 +93,7 @@ jobs:
   # 2) Build macOS .app, zip bằng `ditto` (preserve bundle metadata).
   # ---------------------------------------------------------------------------
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - name: Checkout repository
@@ -142,6 +142,18 @@ jobs:
           name: macos-runtime-reports
           path: '*-runtime.json'
           if-no-files-found: warn
+
+      - name: Verify native macOS window and Finder launch
+        run: |
+          videodub/backend/.venv/bin/python videodub/desktop/verify_startup.py videodub/desktop/dist/VideoDub.app/Contents/MacOS/VideoDub macos-startup/direct
+          videodub/backend/.venv/bin/python videodub/desktop/verify_startup.py videodub/desktop/dist/VideoDub.app/Contents/MacOS/VideoDub macos-startup/finder --finder
+
+      - name: Print macOS startup logs
+        if: always()
+        run: |
+          if [ -d macos-startup ]; then
+            find macos-startup -type f \( -name '*.log' -o -name 'startup.json' \) -print -exec tail -n 100 {} \;
+          fi
 
       - name: Zip macOS artifact (ditto)
         run: |

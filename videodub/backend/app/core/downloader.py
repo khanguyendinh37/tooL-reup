@@ -151,10 +151,12 @@ async def download_douyin_by_api(url: str, output_dir: str, video_id: str, progr
     # Load cookies if available
     cookies_file = get_cookies_file("douyin")
     cookie_jar = aiohttp.CookieJar(unsafe=True)
+    loaded_cookies = {}
     if cookies_file and os.path.exists(cookies_file):
         # Parse Netscape format cookies
         cookie_dict = parse_netscape_cookies(cookies_file)
         if cookie_dict:
+            loaded_cookies = cookie_dict
             # Use update_cookies with proper URL object
             from http.cookies import SimpleCookie
             from yarl import URL
@@ -216,6 +218,21 @@ async def download_douyin_by_api(url: str, output_dir: str, video_id: str, progr
     async with aiohttp.ClientSession(headers=headers, cookie_jar=cookie_jar) as session:
         # Try multiple API endpoints in order of preference
         endpoints_to_try = [
+            # Current web detail endpoint requires the device cookie as a
+            # header as well. Keep these headers off media/CDN requests.
+            {
+                "url": "https://www.douyin.com/aweme/v1/web/aweme/detail/",
+                "params": {
+                    "aweme_id": douyin_video_id,
+                    "aid": "6383",
+                    "device_platform": "webapp",
+                },
+                "headers": {
+                    "uifid": loaded_cookies.get("UIFID") or loaded_cookies.get("UIFID_TEMP", ""),
+                    "x-tt-argus": "1",
+                },
+                "parser": "douyin_v1",
+            },
             # 1. iesdouyin web API (sometimes works without X-Bogus)
             {
                 "url": "https://www.iesdouyin.com/web/api/v2/aweme/iteminfo/",
@@ -274,7 +291,9 @@ async def download_douyin_by_api(url: str, output_dir: str, video_id: str, progr
                     logger.info(f"Generated X-Bogus: {x_bogus[:20]}...")
 
                 logger.info(f"Trying Douyin API endpoint: {endpoint['url']}")
-                async with session.get(endpoint["url"], params=params) as resp:
+                async with session.get(endpoint["url"], params=params,
+                                       headers=endpoint.get("headers"),
+                                       timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     if resp.status != 200:
                         text = await resp.text()
                         logger.warning(f"Endpoint {endpoint['url']} returned {resp.status}: {text[:200]}")
@@ -482,9 +501,12 @@ def parse_netscape_cookies(cookies_file: str, platform: str = "douyin") -> dict:
     }.get(platform, [])
     logger.info(f"Parsing cookies for platform: {platform}, domain_filter: {domain_filter}")
     try:
-        with open(cookies_file, "r", encoding="utf-8") as f:
+        with open(cookies_file, "r", encoding="utf-8-sig") as f:
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
+                # Netscape HttpOnly entries are cookies, not comments.
+                if line.startswith("#HttpOnly_"):
+                    line = line[len("#HttpOnly_"):]
                 if not line or line.startswith("#"):
                     continue
                 parts = line.split("\t")
@@ -499,7 +521,9 @@ def parse_netscape_cookies(cookies_file: str, platform: str = "douyin") -> dict:
                     continue
                 # Only include cookies for the relevant platform
                 if domain_filter:
-                    if any(d in domain for d in domain_filter):
+                    normalized_domain = domain.lower().lstrip(".")
+                    if any(normalized_domain == d or normalized_domain.endswith("." + d)
+                           for d in domain_filter):
                         cookies[name] = value
                 else:
                     cookies[name] = value
@@ -1965,10 +1989,10 @@ async def download_video(url: str, output_dir: str = str(TEMP_DIR), progress_cb=
         # For Douyin, convert jingxuan/collection URLs to direct video URLs for yt-dlp
         ytdlp_url = url
         if platform == "douyin":
-            video_id = extract_douyin_video_id(url)
-            if video_id and ("jingxuan" in url or "modal_id" in url):
+            douyin_id = extract_douyin_video_id(url)
+            if douyin_id:
                 # Convert collection/jingxuan URL to direct video URL
-                ytdlp_url = f"https://www.douyin.com/video/{video_id}"
+                ytdlp_url = f"https://www.douyin.com/video/{douyin_id}"
                 logger.info(f"Converted collection URL to direct video URL: {ytdlp_url}")
 
         result = await download_with_ytdlp(ytdlp_url, output_dir, video_id, progress_cb=progress_cb)
@@ -1989,6 +2013,14 @@ async def download_video(url: str, output_dir: str = str(TEMP_DIR), progress_cb=
         logger.error(f"yt-dlp failed: {e}")
         last_error = e
 
+    if platform == "douyin" and "fresh cookies" in str(last_error).lower():
+        raise Exception(
+            "Douyin không trả về dữ liệu video (yt-dlp: Fresh cookies are needed). "
+            "Thông báo này không khẳng định cookies đã hết hạn. "
+            "Hãy mở đúng video trên douyin.com bằng trình duyệt, hoàn tất xác minh nếu có, "
+            "rồi xuất lại cookies và nhập vào Cài đặt > Quản lý Cookies của ứng dụng đang dùng. "
+            "Nếu vẫn lỗi, gửi link video và log để kiểm tra bộ tải Douyin."
+        ) from last_error
     raise Exception(f"Cannot download video: {last_error}")
 
 

@@ -34,7 +34,7 @@ brotli>=1.1.0
 # urllib is part of Python standard library; no provider SDK/API dependency is required.
 
 # TTS (Edge TTS - supports voice selection like Nam Minh, Hoài My, etc.)
-edge-tts==7.2.8
+edge-tts==7.3.1
 # Network fallback when Edge TTS is unavailable or rate-limited.
 gTTS>=2.5.4
 

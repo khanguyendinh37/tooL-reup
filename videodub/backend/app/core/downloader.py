@@ -369,24 +369,7 @@ async def download_douyin_by_api(url: str, output_dir: str, video_id: str, progr
 
         # Get video URL - try multiple quality options
         video = aweme_detail.get("video", {})
-        play_addr = video.get("play_addr", {})
-        download_addr = video.get("download_addr", {})
-        bit_rate = video.get("bit_rate", [])
-
-        # Prefer download_addr (no watermark), fallback to play_addr
-        video_url = None
-        if download_addr and download_addr.get("url_list"):
-            video_url = download_addr["url_list"][0]
-        elif play_addr and play_addr.get("url_list"):
-            video_url = play_addr["url_list"][0]
-        elif bit_rate and bit_rate[0].get("play_addr", {}).get("url_list"):
-            video_url = bit_rate[0]["play_addr"]["url_list"][0]
-
-        if not video_url:
-            raise Exception("No playable video URL found in Douyin API response")
-
-        # Replace playwm with play for no watermark (if using play_addr)
-        video_url = video_url.replace("playwm", "play")
+        video_url = select_douyin_playback_url(video)
 
         logger.info(f"Downloading video from: {video_url[:100]}...")
 
@@ -430,6 +413,25 @@ async def download_douyin_by_api(url: str, output_dir: str, video_id: str, progr
             "title": title,
             "duration": duration,
         }
+
+
+def select_douyin_playback_url(video: dict) -> str:
+    """Use playback streams; download_addr may contain Douyin's watermark."""
+    addresses = [video.get("play_addr") or {}]
+    addresses.extend((item.get("play_addr") or {}) for item in video.get("bit_rate", [])
+                     if isinstance(item, dict))
+    for address in addresses:
+        for url in address.get("url_list") or []:
+            if not isinstance(url, str):
+                continue
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                continue
+            # Do not alter signed CDN URLs or silently select download_addr.
+            if "/playwm/" in parsed.path:
+                continue
+            return url
+    raise RuntimeError("Douyin không cung cấp luồng phát video phù hợp; không chọn bản download có thể chứa watermark.")
 
 
 def extract_douyin_video_id(url: str) -> str | None:

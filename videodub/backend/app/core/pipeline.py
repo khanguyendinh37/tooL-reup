@@ -684,8 +684,13 @@ async def run_pipeline(job_id: str, url: str, source_lang: str,
             raise RuntimeError("Không có nội dung phụ đề đã dịch để tạo audio lồng tiếng")
         tts_dir = os.path.join(job_dir, "tts")
         rate = speed_to_rate(tts_speed)
+        async def report_tts_progress(completed, total):
+            await _check_cancelled(session, job_id)
+            await update_job(session, job_id, "tts", int(completed * 50 / total))
+
         audio_files = await generate_dubbing_audio(
-            translated_segments, voice, tts_dir, rate, target_lang=target_lang
+            translated_segments, voice, tts_dir, rate, target_lang=target_lang,
+            progress_cb=report_tts_progress,
         )
         if len(audio_files) != expected_audio_count:
             raise RuntimeError(

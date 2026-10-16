@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 # Keep a small bounded pool so Edge TTS requests can run concurrently without
 # overwhelming the service or the local machine.
-TTS_CONCURRENCY = 2
+TTS_CONCURRENCY = 4
 TTS_SEGMENT_TIMEOUT_SECONDS = 90
 TTS_RECOVERY_ROUNDS = 2
 TTS_RECOVERY_DELAY_SECONDS = 10
@@ -22,6 +22,10 @@ TTS_RECOVERY_DELAY_SECONDS = 10
 # case without switching speakers.
 EDGE_TTS_MAX_ATTEMPTS = 3
 EDGE_TTS_RETRY_BASE_SECONDS = 1.0
+
+
+class TTSAccessError(RuntimeError):
+    """Provider rejected access; retrying every cue cannot fix authorization."""
 
 # Edge TTS voices mapping - frontend voice IDs match these
 EDGE_TTS_VOICES = {
@@ -413,6 +417,12 @@ async def text_to_speech_edge(text: str, voice: str, output_path: str, rate: str
             await communicate.save(output_path)
             return output_path
         except Exception as e:
+            if getattr(e, "status", None) in (401, 403):
+                raise TTSAccessError(
+                    "Dịch vụ giọng đọc từ chối truy cập (401/403). "
+                    "Đã dừng tạo giọng để tránh thử lại kéo dài. "
+                    "Hãy cập nhật ứng dụng hoặc thử lại sau; giọng đã chọn được giữ nguyên."
+                ) from e
             last_error = e
             if attempt < EDGE_TTS_MAX_ATTEMPTS - 1:
                 wait = min(10.0, EDGE_TTS_RETRY_BASE_SECONDS * (2 ** attempt))
@@ -479,6 +489,8 @@ async def _generate_segment_audio(index: int, segment: dict, voice: str,
                 "text": text,
                 "audio_path": segment_path,
             }
+        except TTSAccessError:
+            raise
         except Exception as exc:
             logger.error(
                 f"Failed to generate TTS for segment {index} with selected voice {voice}: {exc}"
@@ -505,7 +517,7 @@ def cleanup_tts_directory(output_dir: str) -> None:
 
 async def generate_dubbing_audio(segments: list, voice: str,
                                  output_dir: str, rate: str = "+0%",
-                                 target_lang: str = "vi") -> list:
+                                 target_lang: str = "vi", progress_cb=None) -> list:
     """Generate all TTS segments concurrently while preserving timeline order.
 
     Reject incomplete batches instead of publishing missing speech.
@@ -516,40 +528,58 @@ async def generate_dubbing_audio(segments: list, voice: str,
         (index, segment) for index, segment in enumerate(segments)
         if segment.get("text", "").strip()
     ]
-    tasks = [
-        _generate_segment_audio(index, segment, voice, output_dir, rate, target_lang, semaphore)
-        for index, segment in indexed_segments
-    ]
-
-    if not tasks:
+    if not indexed_segments:
         logger.warning("No transcribed text segments to synthesize")
         return []
 
     logger.info(
-        f"Generating {len(tasks)} TTS segments concurrently (limit={TTS_CONCURRENCY})"
+        f"Generating {len(indexed_segments)} TTS segments concurrently (limit={TTS_CONCURRENCY})"
     )
-    results = await asyncio.gather(*tasks)
-    # Let the provider recover, then retry only failed cues sequentially.
-    # Keep successful audio and its original index; never substitute a voice.
+    results = [None] * len(indexed_segments)
+    completed = 0
+
+    async def generate(position):
+        index, segment = indexed_segments[position]
+        result = await _generate_segment_audio(
+            index, segment, voice, output_dir, rate, target_lang, semaphore,
+        )
+        return position, result
+
+    async def run_batch(positions):
+        nonlocal completed
+        tasks = [asyncio.create_task(generate(position)) for position in positions]
+        try:
+            for task in asyncio.as_completed(tasks):
+                position, result = await task
+                results[position] = result
+                if result is not None:
+                    completed += 1
+                    if progress_cb is not None:
+                        await progress_cb(completed, len(indexed_segments))
+        finally:
+            # An access failure or cancellation must stop pending provider calls.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    await run_batch(range(len(indexed_segments)))
+    # Retry only failed cues with the same bounded parallel pool and voice.
     for recovery_round in range(TTS_RECOVERY_ROUNDS):
         pending = [position for position, result in enumerate(results) if result is None]
         if not pending:
             break
         delay = TTS_RECOVERY_DELAY_SECONDS * (recovery_round + 1)
         logger.warning(
-            "Retrying %d failed TTS cues with voice %s sequentially after %ss (round %d/%d)",
+            "Retrying %d failed TTS cues with voice %s concurrently after %ss (round %d/%d)",
             len(pending), voice, delay, recovery_round + 1, TTS_RECOVERY_ROUNDS,
         )
         await asyncio.sleep(delay)
-        for position in pending:
-            index, segment = indexed_segments[position]
-            results[position] = await _generate_segment_audio(
-                index, segment, voice, output_dir, rate, target_lang, semaphore,
-            )
+        await run_batch(pending)
     failed = sum(result is None for result in results)
     if failed:
         raise RuntimeError(
-            f"Không tạo được {failed}/{len(tasks)} đoạn lồng tiếng bằng giọng {voice}. "
+            f"Không tạo được {failed}/{len(indexed_segments)} đoạn lồng tiếng bằng giọng {voice}. "
             "Hệ thống giữ nguyên giọng đã chọn. Vui lòng thử lại."
         )
     return results

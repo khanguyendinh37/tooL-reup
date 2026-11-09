@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime exceptions required for notarization of a PyInstaller app
+  that embeds Python, PyTorch and CTranslate2:
+  - JIT / unsigned executable memory: PyTorch and ctypes allocate executable pages.
+  - Disable library validation: bundled third-party dylibs are signed with our
+    identity at package time, but Python extension modules are loaded with
+    dlopen and must not be rejected by Team-ID checks.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

@@ -1,4 +1,6 @@
 # PyInstaller onedir specification for the VideoDub desktop app.
+import os
+import re
 from pathlib import Path
 
 from PyInstaller.building.build_main import Analysis, COLLECT, EXE, PYZ
@@ -9,6 +11,11 @@ ROOT = Path(SPEC).resolve().parents[1]
 BACKEND_DIR = ROOT / "backend"
 FRONTEND_DIST = ROOT / "frontend" / "dist"
 FFMPEG_DIR = ROOT / "desktop" / "vendor" / "ffmpeg"
+
+# Release version, e.g. "1.2.3". CI passes it from the git tag (v1.2.3).
+APP_VERSION = (os.environ.get("VIDEODUB_VERSION") or "1.0.0").lstrip("vV")
+_numbers = [int(part) for part in re.findall(r"\d+", APP_VERSION)[:4]]
+VERSION_TUPLE = tuple((_numbers + [0, 0, 0, 0])[:4])
 
 
 datas = [
@@ -55,6 +62,36 @@ for distribution in ('yt-dlp', 'curl_cffi', 'pytubefix', 'edge-tts',
 
 icon_path = ROOT / "desktop" / "VideoDub.ico"
 
+# Windows "Details" tab metadata. Signed installers and SmartScreen reputation
+# are tied to consistent product/company names, so keep these stable.
+from PyInstaller.utils.win32.versioninfo import (
+    FixedFileInfo, StringFileInfo, StringStruct, StringTable, VarFileInfo, VarStruct, VSVersionInfo,
+)
+
+_version_text = ".".join(str(part) for part in VERSION_TUPLE)
+version_info = VSVersionInfo(
+    ffi=FixedFileInfo(filevers=VERSION_TUPLE, prodvers=VERSION_TUPLE),
+    kids=[
+        StringFileInfo([StringTable("040904B0", [
+            StringStruct("CompanyName", os.environ.get("VIDEODUB_PUBLISHER", "VideoDub")),
+            StringStruct("FileDescription", "VideoDub - AI video dubbing"),
+            StringStruct("FileVersion", _version_text),
+            StringStruct("InternalName", "VideoDub"),
+            StringStruct("OriginalFilename", "VideoDub.exe"),
+            StringStruct("ProductName", "VideoDub"),
+            StringStruct("ProductVersion", APP_VERSION),
+        ])]),
+        VarFileInfo([VarStruct("Translation", [1033, 1200])]),
+    ],
+)
+
+import sys
+
+sys.path.insert(0, str(ROOT / "desktop"))
+from packaging_utils import shorten_metadata_paths  # noqa: E402
+
+datas = shorten_metadata_paths(datas, workpath)
+
 analysis = Analysis(
     [str(ROOT / "desktop" / "desktop_main.py")],
     pathex=[str(BACKEND_DIR)],
@@ -77,16 +114,17 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     icon=str(icon_path) if icon_path.is_file() else None,
+    version=version_info,
 )
 coll = COLLECT(
     exe,
     analysis.binaries,
     analysis.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name="VideoDub",
 )

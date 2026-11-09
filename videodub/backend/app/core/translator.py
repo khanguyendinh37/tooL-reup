@@ -6,7 +6,7 @@ import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from typing import Iterable, Optional
 
 from app.core.translation_config import TranslationConfig
@@ -29,6 +29,14 @@ FULL_PASS_TIMEOUT_BASE_SECONDS = 90
 FULL_PASS_TIMEOUT_PER_CUE_SECONDS = 2
 FULL_PASS_TIMEOUT_CAP_SECONDS = 600
 GROUP_AI_TIMEOUT_SECONDS = 45
+# A single request cannot return thousands of cues (model output limits), so
+# long videos are sent to the AI route in large chunks instead of one pass.
+# Each chunk is still big enough to carry names and tone within a scene.
+AI_FULL_PASS_MAX_CUES = 250
+AI_FULL_PASS_MAX_CHARS = 24000
+AI_CHUNK_CUES = 150
+AI_CHUNK_MAX_CHARS = 12000
+AI_CHUNK_WORKERS = 2
 GOOGLE_MAX_RETRIES = 3
 GOOGLE_REQUEST_TIMEOUT_SECONDS = 15
 GOOGLE_CIRCUIT_COOLDOWN_SECONDS = 60
@@ -357,6 +365,58 @@ def _translate_whole_file_with_ai(
     if not translations or not _translations_are_meaningful(entries, translations):
         return None
     return translations
+
+
+def _ai_chunks(entries: list, indices: list[int]) -> list[list[int]]:
+    """Split cue indices into consecutive chunks bounded by count and size."""
+    chunks: list[list[int]] = []
+    current: list[int] = []
+    chars = 0
+    for index in indices:
+        size = len(_clean_subtitle_text(entries[index].get("original_text", ""))) + 12
+        if current and (len(current) >= AI_CHUNK_CUES or chars + size > AI_CHUNK_MAX_CHARS):
+            chunks.append(current)
+            current, chars = [], 0
+        current.append(index)
+        chars += size
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _translate_long_file_with_ai(
+    entries: list,
+    translatable_indices: list[int],
+    source: str,
+    target: str,
+    translation_config: TranslationConfig,
+) -> dict[int, str]:
+    """Translate a long file chunk by chunk; return whatever chunks succeeded."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    chunks = _ai_chunks(entries, translatable_indices)
+    logger.info("Translating %s cues with AI in %s chunks", len(translatable_indices), len(chunks))
+
+    def run(chunk: list[int]) -> dict[int, str]:
+        try:
+            translations = _translate_whole_file_with_ai(
+                entries, chunk, source, target, translation_config,
+            )
+        except Exception:
+            logger.warning("AI chunk starting at cue %s failed", chunk[0] + 1, exc_info=True)
+            return {}
+        if not translations:
+            logger.warning(
+                "AI chunk starting at cue %s was incomplete; it will use the fallback route",
+                chunk[0] + 1,
+            )
+        return translations or {}
+
+    merged: dict[int, str] = {}
+    with ThreadPoolExecutor(max_workers=AI_CHUNK_WORKERS) as pool:
+        for result in pool.map(run, chunks):
+            merged.update(result)
+    return merged
 
 
 def _extract_marked_translations(result: str, indices: Iterable[int], target_lang: Optional[str] = None) -> Optional[dict[int, str]]:
@@ -834,7 +894,35 @@ def translate_srt_deep_translator(
         if _clean_subtitle_text(entry.get("original_text", ""))
     ]
 
-    if translation_config and translation_config.is_usable and translatable_indices:
+    translated_indices: set[int] = set()
+    fallback_indices: set[int] = set()
+
+    total_chars = sum(
+        len(_clean_subtitle_text(entries[index].get("original_text", "")))
+        for index in translatable_indices
+    )
+    is_long_file = (
+        len(translatable_indices) > AI_FULL_PASS_MAX_CUES or total_chars > AI_FULL_PASS_MAX_CHARS
+    )
+    if translation_config and translation_config.is_usable and translatable_indices and is_long_file:
+        chunk_translations = _translate_long_file_with_ai(
+            entries, translatable_indices, source, target, translation_config,
+        )
+        for index, translated in chunk_translations.items():
+            entries[index]["translated_text"] = translated
+            translated_indices.add(index)
+        if len(translated_indices) == len(translatable_indices):
+            logger.info(
+                "AI route %s translated all %s cues in chunks",
+                translation_config.provider, len(translatable_indices),
+            )
+            write_tts_srt(entries, output_path)
+            return output_path
+        logger.warning(
+            "AI chunks left %s cues untranslated; using grouped translation for them",
+            len(translatable_indices) - len(translated_indices),
+        )
+    elif translation_config and translation_config.is_usable and translatable_indices:
         whole_file_translations = _translate_whole_file_with_ai(
             entries,
             translatable_indices,
@@ -856,10 +944,10 @@ def translate_srt_deep_translator(
             "Full-context AI pass was unavailable or incomplete; falling back to grouped translation"
         )
 
-    translated_indices: set[int] = set()
-    fallback_indices: set[int] = set()
-
     for group in _context_groups(entries):
+        group = [index for index in group if index not in translated_indices]
+        if not group:
+            continue
         translations = _translate_marked_group(
             entries,
             group,

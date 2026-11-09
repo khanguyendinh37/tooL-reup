@@ -46,7 +46,14 @@ def _normalize_whisper_language(language: str | None) -> str | None:
 
 
 def transcribe_with_whisper(audio_path: str, model_size: str = "small",
-                             language: str = None, device: str = "auto") -> dict:
+                             language: str = None, device: str = "auto",
+                             progress_cb=None, should_stop=None) -> dict:
+    """Transcribe with faster-whisper.
+
+    ``progress_cb(fraction)`` receives 0..1 as segments are decoded, so a
+    multi-hour transcription reports progress instead of sitting at one value.
+    ``should_stop()`` is polled per segment to abandon a cancelled job.
+    """
     from faster_whisper import WhisperModel
 
     if device == "auto":
@@ -74,7 +81,12 @@ def transcribe_with_whisper(audio_path: str, model_size: str = "small",
 
     segments = []
     full_text = ""
+    total = float(getattr(info, "duration", 0) or 0)
     for segment in segments_iter:
+        if should_stop is not None and should_stop():
+            raise InterruptedError("Transcription cancelled")
+        if progress_cb is not None and total > 0:
+            progress_cb(min(segment.end / total, 1.0))
         text = segment.text.strip()
         if not text:
             continue

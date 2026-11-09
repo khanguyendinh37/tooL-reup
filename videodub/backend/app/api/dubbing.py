@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 import os
+from datetime import datetime
 
 from app.models.database import get_session, DubbingJob
 from app.core.paths import resolve_data_path
@@ -20,8 +21,30 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
-# Track running pipeline tasks so they can be cancelled from the UI
+# Track running pipeline tasks so they can be cancelled from the UI. Keeping
+# a strong reference also stops asyncio from garbage-collecting a task that is
+# still running (create_task only keeps a weak reference).
 RUNNING_TASKS: dict[str, asyncio.Task] = {}
+
+# Whisper and Demucs each use several GB of RAM and every CPU core, so two
+# multi-hour jobs at once usually run out of memory or take longer than doing
+# them one after the other. Extra jobs wait in a queue (status "pending").
+MAX_PARALLEL_JOBS = max(1, int(os.getenv("VIDEODUB_MAX_PARALLEL_JOBS", "1") or 1))
+PIPELINE_SLOTS = asyncio.Semaphore(MAX_PARALLEL_JOBS)
+QUEUE_HEARTBEAT_SECONDS = 20
+RESTARTABLE_STATUSES = ("error", "cancelled")
+
+
+def _spawn(job_id: str, coroutine) -> asyncio.Task:
+    task = asyncio.create_task(coroutine)
+    RUNNING_TASKS[job_id] = task
+
+    def _forget(finished: asyncio.Task) -> None:
+        if RUNNING_TASKS.get(job_id) is finished:
+            RUNNING_TASKS.pop(job_id, None)
+
+    task.add_done_callback(_forget)
+    return task
 
 
 def _build_processing_config(
@@ -146,7 +169,7 @@ async def preview_video(req: PreviewRequest, session: AsyncSession = Depends(get
     await session.commit()
     await session.refresh(job)
 
-    asyncio.create_task(run_preview_background(job_id, req.url))
+    _spawn(job_id, run_preview_background(job_id, req.url))
 
     return DubbingResponse.from_orm(job)
 
@@ -192,7 +215,7 @@ async def start_dubbing(req: DubbingRequest, session: AsyncSession = Depends(get
         job = result.scalar_one_or_none()
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
-        if job.status not in ("preview_ready", "error"):
+        if job.status not in ("preview_ready", *RESTARTABLE_STATUSES):
             raise HTTPException(status_code=400, detail=f"Job cannot be started (status: {job.status})")
 
         update_values = dict(
@@ -217,7 +240,8 @@ async def start_dubbing(req: DubbingRequest, session: AsyncSession = Depends(get
         await session.refresh(job)
         translation_config = await load_translation_config(session)
 
-        asyncio.create_task(
+        _spawn(
+            req.job_id,
             run_pipeline_background(
                 req.job_id, req.url, req.source_lang, req.target_lang,
                 req.voice, req.whisper_model, req.tts_speed,
@@ -249,7 +273,8 @@ async def start_dubbing(req: DubbingRequest, session: AsyncSession = Depends(get
     await session.refresh(job)
     translation_config = await load_translation_config(session)
 
-    asyncio.create_task(
+    _spawn(
+        job_id,
         run_pipeline_background(
             job_id, req.url, req.source_lang, req.target_lang,
             req.voice, req.whisper_model, req.tts_speed,
@@ -273,6 +298,8 @@ async def run_pipeline_background(job_id: str, url: str, source_lang: str,
 
     logger.info(f"Starting background pipeline for job {job_id}")
     async with async_session() as session:
+        if not await _wait_for_pipeline_slot(session, job_id):
+            return
         try:
             await run_pipeline(job_id, url, source_lang, target_lang,
                                voice, whisper_model, tts_speed, session,
@@ -293,6 +320,48 @@ async def run_pipeline_background(job_id: str, url: str, source_lang: str,
                 await session.commit()
             except Exception:
                 logger.exception("Could not persist pipeline error state for job %s", job_id)
+        finally:
+            PIPELINE_SLOTS.release()
+
+
+async def _wait_for_pipeline_slot(session: AsyncSession, job_id: str) -> bool:
+    """Queue behind running jobs; return False if the job was cancelled meanwhile.
+
+    While queued the row is touched regularly so the frontend watchdog does
+    not mistake a long wait for a dead job.
+    """
+    announced = False
+    # A separate acquire future is never cancelled by a timeout, so a slot
+    # cannot be lost when the timeout and the release happen together.
+    acquire = asyncio.ensure_future(PIPELINE_SLOTS.acquire())
+    try:
+        while True:
+            done, _ = await asyncio.wait({acquire}, timeout=QUEUE_HEARTBEAT_SECONDS)
+            if done:
+                break
+            values = {"updated_at": datetime.utcnow()}
+            if not announced:
+                values.update(status="pending", progress=0)
+                announced = True
+                logger.info("Job %s is queued behind %d running job(s)", job_id, MAX_PARALLEL_JOBS)
+            await session.execute(
+                update(DubbingJob)
+                .where(DubbingJob.id == job_id, DubbingJob.status != "cancelled")
+                .values(**values)
+            )
+            await session.commit()
+    except BaseException:
+        if acquire.done() and not acquire.cancelled() and acquire.exception() is None:
+            PIPELINE_SLOTS.release()
+        else:
+            acquire.cancel()
+        raise
+
+    result = await session.execute(select(DubbingJob.status).where(DubbingJob.id == job_id))
+    if result.scalar_one_or_none() == "cancelled":
+        PIPELINE_SLOTS.release()
+        return False
+    return True
 
 
 @router.post("/{job_id}/retry", response_model=DubbingResponse)
@@ -304,7 +373,7 @@ async def retry_dubbing(job_id: str, session: AsyncSession = Depends(get_session
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status != "error":
+    if job.status not in RESTARTABLE_STATUSES:
         raise HTTPException(status_code=400, detail=f"Job cannot be retried (status: {job.status})")
 
     processing_config = {}
@@ -353,7 +422,8 @@ async def retry_dubbing(job_id: str, session: AsyncSession = Depends(get_session
     await session.refresh(job)
     translation_config = await load_translation_config(session)
 
-    asyncio.create_task(
+    _spawn(
+        job_id,
         run_pipeline_background(
             job_id, job.url, source_lang, target_lang, voice, whisper_model,
             tts_speed, subtitle_config=subtitle_config, audio_config=audio_config,
@@ -476,9 +546,15 @@ async def cancel_dubbing(job_id: str, session: AsyncSession = Depends(get_sessio
     await session.execute(
         update(DubbingJob)
         .where(DubbingJob.id == job_id)
-        .values(status="cancelled")
+        .values(status="cancelled", updated_at=datetime.utcnow())
     )
     await session.commit()
+
+    # Interrupt the running task right away; the pipeline also stops its
+    # worker threads (Whisper, Demucs) when it sees the cancellation.
+    task = RUNNING_TASKS.get(job_id)
+    if task is not None and not task.done():
+        task.cancel()
 
     return {"status": "cancelled"}
 

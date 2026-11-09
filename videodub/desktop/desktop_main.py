@@ -108,9 +108,18 @@ if '--pipeline-check' in sys.argv:
     # Refuse to run a test over the user's database or an earlier test job.
     if (check_root / 'videodub.db').exists():
         raise RuntimeError('Pipeline check requires a fresh isolated data directory')
+    # The check produces a real dubbed video, so packaged builds require the
+    # user's license (read from the normal data dir) like the UI does.
+    os.environ['VIDEODUB_LICENSE_DIR'] = os.environ.get('VIDEODUB_DATA_DIR') or str(_user_data_dir())
     os.environ['VIDEODUB_DATA_DIR'] = str(check_root)
     os.environ['DATABASE_URL'] = f"sqlite+aiosqlite:///{check_root.as_posix()}/videodub.db"
     _prepare_runtime()
+    from app.core.licensing import get_manager
+    _license_status = get_manager().refresh_if_due()
+    if not _license_status['allowed']:
+        logging.error('Pipeline check refused: %s', _license_status['message'])
+        logging.shutdown()
+        raise SystemExit(f"License required: {_license_status['message']}")
     from app.core.pipeline_check import run as run_pipeline_check
     check_exit = 0
     try:

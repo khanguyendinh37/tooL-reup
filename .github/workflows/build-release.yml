@@ -15,6 +15,15 @@ on:
 permissions:
   contents: write
 
+# Public license config baked into the desktop builds (repository *variables*,
+# not secrets: nothing here is private). Builds fail when they are missing.
+# See videodub/desktop/README.md "Licensing".
+env:
+  VIDEODUB_LICENSE_ACCOUNT: ${{ vars.VIDEODUB_LICENSE_ACCOUNT }}
+  VIDEODUB_LICENSE_PUBLIC_KEY: ${{ vars.VIDEODUB_LICENSE_PUBLIC_KEY }}
+  VIDEODUB_LICENSE_API_URL: ${{ vars.VIDEODUB_LICENSE_API_URL }}
+  VIDEODUB_LICENSE_CONTACT: ${{ vars.VIDEODUB_LICENSE_CONTACT }}
+
 jobs:
   # ---------------------------------------------------------------------------
   # 1) Build Windows onedir, zip bằng PowerShell (có sẵn, không cần 7z).

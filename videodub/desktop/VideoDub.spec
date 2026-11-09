@@ -17,6 +17,11 @@ datas = [
 binaries = []
 hiddenimports = []
 
+# Commercial builds must ship the license server config (fails without it).
+import sys; sys.path.insert(0, str(ROOT / "desktop"))
+from license_build_config import license_data_file
+datas.append((str(license_data_file(ROOT / "desktop" / "build" / "license")), "."))
+
 # These libraries use dynamic imports or package data at runtime. Collecting
 # them here is more reliable than relying on PyInstaller's static analysis,
 # especially for webview, Whisper and Demucs.

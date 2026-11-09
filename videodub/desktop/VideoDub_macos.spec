@@ -19,6 +19,11 @@ datas = [
 binaries = []
 hiddenimports = []
 
+# Commercial builds must ship the license server config (fails without it).
+import sys; sys.path.insert(0, str(ROOT / "desktop"))
+from license_build_config import license_data_file
+datas.append((str(license_data_file(ROOT / "desktop" / "build" / "license")), "."))
+
 # These libraries use dynamic imports or package data at runtime.
 for package in (
     "webview",

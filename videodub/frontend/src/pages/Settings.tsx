@@ -4,6 +4,7 @@ import { WHISPER_MODELS, TTS_VOICES, LANGUAGES } from '@/lib/utils'
 import { getAllCookiesStatus, uploadCookies, deleteCookies, getSettings, testTranslationConnection, updateSettings } from '@/lib/api'
 import { VoicePreviewButton } from '@/components/VoicePreviewButton'
 import TranslationAiRoute from '@/components/settings/TranslationAiRoute'
+import LicenseCard from '@/components/license/LicenseCard'
 import { getTranslationProvider, type TranslationConnectionStatus, type TranslationModelOption, type TranslationProviderId } from '@/lib/translation'
 
 interface PlatformCookies {
@@ -312,6 +313,8 @@ export default function Settings() {
       {settingsError && (
         <p role="alert" className="-mt-3 text-sm text-red-300">{settingsError}</p>
       )}
+
+      <LicenseCard />
 
       {/* Whisper Settings */}
       <div className="glass-card">

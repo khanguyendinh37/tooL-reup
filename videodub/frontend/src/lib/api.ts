@@ -2,6 +2,7 @@ const API_BASE = '/api'
 
 import type { TranslationModelOption, TranslationProviderId } from '@/lib/translation'
 import type { BlurRegion } from '@/lib/workflow'
+import { LICENSE_REQUIRED_EVENT } from '@/lib/license'
 
 export interface DubbingResponse {
   id: string
@@ -77,7 +78,10 @@ async function apiFetch(
 }
 
 async function throwApiError(response: Response, fallback: string): Promise<never> {
-  const data = await response.json().catch(() => null) as { detail?: string; message?: string } | null
+  const data = await response.json().catch(() => null) as { detail?: string; message?: string; code?: string } | null
+  if (response.status === 403 && data?.code === 'license_required') {
+    window.dispatchEvent(new Event(LICENSE_REQUIRED_EVENT))
+  }
   throw new Error(data?.detail || data?.message || fallback)
 }
 

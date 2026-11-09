@@ -45,6 +45,12 @@ def run_checks(report_path: str) -> None:
         importlib.import_module('app.main')
         asyncio.run(check_async_database())
         report['checks']['async_database'] = 'ok'
+        importlib.import_module('app.core.license_keygen')
+        if getattr(sys, 'frozen', False):
+            from app.core.licensing import build_manager
+            license_error = build_manager().config_error
+            if license_error:
+                raise RuntimeError(f'Bundled license config invalid: {license_error}')
         from app.core.downloader import _build_impersonate_target
         target = _build_impersonate_target('facebook')
         if target is None:

@@ -41,6 +41,9 @@ gTTS>=2.5.4
 # Vocal removal
 demucs==4.1.0
 
+# License certificate verification (Ed25519)
+cryptography==46.0.7
+
 # Utilities
 python-dotenv==1.0.1
 watchfiles==0.21.0

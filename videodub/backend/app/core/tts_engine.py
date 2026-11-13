@@ -16,6 +16,13 @@ TTS_CONCURRENCY = 4
 TTS_SEGMENT_TIMEOUT_SECONDS = 90
 TTS_RECOVERY_ROUNDS = 2
 TTS_RECOVERY_DELAY_SECONDS = 10
+# Multi-hour videos have thousands of cues, so a burst of Edge TTS throttling
+# is likely somewhere in the run. They get more, longer-spaced recovery rounds
+# before the job is failed (the finished cues are kept on disk for a retry).
+TTS_LONG_JOB_SEGMENTS = 300
+TTS_LONG_RECOVERY_ROUNDS = 5
+TTS_RECOVERY_MAX_DELAY_SECONDS = 120
+TTS_MANIFEST_NAME = "manifest.json"
 
 # Retry resilience for a single Edge TTS call. ``EDGE_TTS_RETRY_BASE_SECONDS``
 # doubles per attempt, capped at 10s, so up to 3 attempts takes ~17s worst
@@ -475,13 +482,27 @@ async def _generate_segment_audio(index: int, segment: dict, voice: str,
         return None
 
     segment_path = os.path.join(output_dir, f"seg_{index:04d}.mp3")
+    result = {
+        "index": index,
+        "start": segment["start"],
+        "end": segment["end"],
+        "text": text,
+        "audio_path": segment_path,
+    }
+    # A finished cue from an interrupted run is reused. Files are only ever
+    # moved into place once complete, so an existing file is never partial.
+    if os.path.isfile(segment_path) and os.path.getsize(segment_path) > 0:
+        return result
+    partial_path = segment_path + ".part.mp3"
     async with semaphore:
         try:
             # Retry the selected voice with a bounded timeout.
             await asyncio.wait_for(
-                text_to_speech_with_fallback(text, voice, segment_path, rate, target_lang),
+                text_to_speech_with_fallback(text, voice, partial_path, rate, target_lang),
                 timeout=TTS_SEGMENT_TIMEOUT_SECONDS,
             )
+            if os.path.exists(partial_path):
+                os.replace(partial_path, segment_path)
             return {
                 "index": index,
                 "start": segment["start"],
@@ -496,6 +517,28 @@ async def _generate_segment_audio(index: int, segment: dict, voice: str,
                 f"Failed to generate TTS for segment {index} with selected voice {voice}: {exc}"
             )
             return None
+
+
+def prepare_tts_directory(output_dir: str, cache_key: dict) -> None:
+    """Keep cached cue audio only when it was made from the same inputs.
+
+    ``cache_key`` should identify the translated text, voice and rate. If any
+    of them changed since the files were written, the stale cues are removed
+    so a retry never mixes two voices or two translations.
+    """
+    import json
+
+    manifest_path = os.path.join(output_dir, TTS_MANIFEST_NAME)
+    try:
+        with open(manifest_path, encoding="utf-8") as handle:
+            previous = json.load(handle)
+    except (OSError, ValueError):
+        previous = None
+    if previous != cache_key and os.path.isdir(output_dir):
+        shutil.rmtree(output_dir, ignore_errors=True)
+    os.makedirs(output_dir, exist_ok=True)
+    with open(manifest_path, "w", encoding="utf-8") as handle:
+        json.dump(cache_key, handle)
 
 
 def cleanup_tts_directory(output_dir: str) -> None:
@@ -565,14 +608,22 @@ async def generate_dubbing_audio(segments: list, voice: str,
 
     await run_batch(range(len(indexed_segments)))
     # Retry only failed cues with the same bounded parallel pool and voice.
-    for recovery_round in range(TTS_RECOVERY_ROUNDS):
+    recovery_rounds = (
+        TTS_LONG_RECOVERY_ROUNDS if len(indexed_segments) >= TTS_LONG_JOB_SEGMENTS
+        else TTS_RECOVERY_ROUNDS
+    )
+    for recovery_round in range(recovery_rounds):
         pending = [position for position, result in enumerate(results) if result is None]
         if not pending:
             break
-        delay = TTS_RECOVERY_DELAY_SECONDS * (recovery_round + 1)
+        delay = min(
+            TTS_RECOVERY_DELAY_SECONDS * (2 ** recovery_round if recovery_rounds > TTS_RECOVERY_ROUNDS
+                                          else recovery_round + 1),
+            TTS_RECOVERY_MAX_DELAY_SECONDS,
+        )
         logger.warning(
             "Retrying %d failed TTS cues with voice %s concurrently after %ss (round %d/%d)",
-            len(pending), voice, delay, recovery_round + 1, TTS_RECOVERY_ROUNDS,
+            len(pending), voice, delay, recovery_round + 1, recovery_rounds,
         )
         await asyncio.sleep(delay)
         await run_batch(pending)
@@ -580,7 +631,8 @@ async def generate_dubbing_audio(segments: list, voice: str,
     if failed:
         raise RuntimeError(
             f"Không tạo được {failed}/{len(indexed_segments)} đoạn lồng tiếng bằng giọng {voice}. "
-            "Hệ thống giữ nguyên giọng đã chọn. Vui lòng thử lại."
+            "Hệ thống giữ nguyên giọng đã chọn. Các đoạn đã tạo được giữ lại; "
+            "bấm Thử lại để chỉ tạo tiếp các đoạn còn thiếu."
         )
     return results
 
@@ -608,38 +660,46 @@ def _atempo_chain(speed: float) -> str:
     return ",".join(chain)
 
 
+MERGE_SAMPLE_RATE = 44100
+MERGE_CHANNELS = 2
+MERGE_BYTES_PER_FRAME = MERGE_CHANNELS * 2  # s16le
+MERGE_DECODE_WORKERS = 6
+MERGE_DECODE_WINDOW = 48
+MERGE_MAX_SPEEDUP = 4.0
+
+
+def _decode_segment_pcm(audio_path: str, speed: float = 1.0) -> bytes:
+    """Decode one TTS file to raw s16le PCM, optionally time-stretched."""
+    cmd = ["ffmpeg", "-v", "error", "-i", audio_path]
+    if speed > 1.001:
+        cmd.extend(["-af", _atempo_chain(speed)])
+    cmd.extend([
+        "-f", "s16le", "-acodec", "pcm_s16le",
+        "-ar", str(MERGE_SAMPLE_RATE), "-ac", str(MERGE_CHANNELS), "pipe:1",
+    ])
+    result = subprocess.run(cmd, capture_output=True, check=True, **hidden_subprocess_kwargs())
+    data = result.stdout
+    return data[:len(data) - len(data) % MERGE_BYTES_PER_FRAME]
+
+
 def merge_tts_segments(audio_files: list, total_duration: float,
                         output_path: str) -> tuple[str, list[tuple[int, float, float]]]:
-    """Concatenate per-segment TTS audio into one dubbed track.
+    """Place per-segment TTS audio on the video timeline as one WAV track.
 
-    The previous implementation passed every input file inline as
-    ``-i /path/to/seg_NNNN.mp3`` arguments to a single ``ffmpeg`` invocation.
-    On Windows the command line is capped at 32,768 characters, so a video
-    with ~300+ subtitles (each input path ~100 chars) trips WinError 206 and
-    the job aborts. This implementation stages each segment into a padded
-    WAV (silence prefix matching the cue start) and then concatenates them
-    so the segment timings match the original SRT cues. The ffmpeg command
-    is one short ``-f concat -i list.txt`` call regardless of segment count.
+    Each segment is decoded straight to PCM (one ffmpeg call, run in a small
+    thread pool) and written into a single raw stream with exact sample-count
+    silence between cues. The old implementation spawned four or five
+    ffmpeg/ffprobe processes per cue sequentially, which took close to an hour
+    for a multi-hour video with thousands of cues.
 
-    Overlap handling: when a translated segment runs longer than the source
-    cue, its natural audio would push past the next cue's start and the
-    previous behaviour stacked segments end-to-end (gap dropped to 0), which
-    compressed every following cue, made the voice unnaturally fast, and
-    left the on-screen subtitle drifting later and later than the audio.
-    The current version applies ``atempo`` to the *next* segment so it
-    fits inside the time window the previous one left: each segment that
-    would otherwise start mid-sentence is sped up enough to land on its
-    nominal SRT start time. Segments that already fit keep their natural
-    speed, so the voice still sounds normal in the easy stretches and only
-    speeds up where the translation genuinely overflows.
+    Overlap handling: when a translated segment runs longer than the gap until
+    the next cue, it is sped up with ``atempo`` (capped at 4x) so it ends on
+    the next cue's start. If even 4x does not fit, the next cue starts right
+    after it. Segments that fit keep their natural speed.
 
-    Returns a tuple of ``(output_path, actual_segments)`` where each entry in
-    ``actual_segments`` is ``(cue_index, actual_start, actual_end)`` giving
-    the absolute time the segment's audio occupies in the merged track.
-    Translations are usually longer than the source phrase, so the actual
-    audio length commonly exceeds the original SRT window; callers that
-    build the on-screen subtitle SRT should use this timing so the burn-in
-    text stays in sync with the dubbed voice.
+    Returns ``(output_path, actual_segments)`` where each entry is
+    ``(cue_index, actual_start, actual_end)``: the absolute time the segment's
+    audio occupies in the merged track, used to rebuild the on-screen SRT.
     """
     if not audio_files:
         logger.warning("No audio files to merge")
@@ -647,254 +707,83 @@ def merge_tts_segments(audio_files: list, total_duration: float,
     if total_duration <= 0:
         raise ValueError("Video duration must be greater than zero before merging TTS")
 
-    concat_list_path = output_path + ".concat.txt"
-    padded_dir = output_path + ".padded"
-    os.makedirs(padded_dir, exist_ok=True)
+    sorted_files = sorted(
+        (af for af in audio_files if af and af.get("audio_path")
+         and os.path.exists(af["audio_path"])),
+        key=lambda af: float(af.get("start", 0.0) or 0.0),
+    )
+    if not sorted_files:
+        logger.warning("No TTS audio files available to merge")
+        return "", []
+
+    frame_seconds = 1.0 / MERGE_SAMPLE_RATE
+    total_frames = int(round(total_duration * MERGE_SAMPLE_RATE))
+    starts = [max(float(af.get("start", 0.0) or 0.0), 0.0) for af in sorted_files]
+    raw_path = output_path + ".pcm"
     actual_segments: list[tuple[int, float, float]] = []
+    written_frames = 0
+
+    from concurrent.futures import ThreadPoolExecutor
+
     try:
-        sorted_files = sorted(
-            (af for af in audio_files if af.get("audio_path")
-             and os.path.exists(af["audio_path"])),
-            key=lambda af: af.get("start", 0.0),
-        )
-        if not sorted_files:
-            logger.warning("No TTS audio files available to merge")
-            return "", []
+        with open(raw_path, "wb") as raw, ThreadPoolExecutor(MERGE_DECODE_WORKERS) as pool:
+            for window_start in range(0, len(sorted_files), MERGE_DECODE_WINDOW):
+                window = sorted_files[window_start:window_start + MERGE_DECODE_WINDOW]
+                decoded = list(pool.map(lambda af: _decode_segment_pcm(af["audio_path"]), window))
+                for offset, (af, pcm) in enumerate(zip(window, decoded)):
+                    i = window_start + offset
+                    if written_frames >= total_frames:
+                        break
+                    try:
+                        cue_index = int(af.get("index", i))
+                    except (TypeError, ValueError):
+                        cue_index = i
+                    start_frame = max(int(round(starts[i] * MERGE_SAMPLE_RATE)), written_frames)
+                    required_end = starts[i + 1] if i + 1 < len(sorted_files) else total_duration
+                    required_frames = int(round(required_end * MERGE_SAMPLE_RATE)) - start_frame
+                    natural_frames = len(pcm) // MERGE_BYTES_PER_FRAME
+                    if natural_frames > required_frames and natural_frames > 0:
+                        speed = (natural_frames / required_frames) if required_frames > 0 else MERGE_MAX_SPEEDUP
+                        if speed > MERGE_MAX_SPEEDUP:
+                            logger.warning(
+                                "Cue %s needs %.2fx to fit before the next cue; capping at %.0fx "
+                                "(the next cue will start slightly late)",
+                                cue_index, speed, MERGE_MAX_SPEEDUP,
+                            )
+                            speed = MERGE_MAX_SPEEDUP
+                        if speed > 1.001:
+                            pcm = _decode_segment_pcm(af["audio_path"], speed)
+                    frames = len(pcm) // MERGE_BYTES_PER_FRAME
+                    # Silence up to the cue start, then the speech, both clipped
+                    # to the video length.
+                    silence = start_frame - written_frames
+                    if silence > 0:
+                        raw.write(bytes(silence * MERGE_BYTES_PER_FRAME))
+                        written_frames += silence
+                    frames = min(frames, total_frames - written_frames)
+                    if frames <= 0:
+                        break
+                    raw.write(pcm[:frames * MERGE_BYTES_PER_FRAME])
+                    actual_segments.append((
+                        cue_index,
+                        written_frames * frame_seconds,
+                        (written_frames + frames) * frame_seconds,
+                    ))
+                    written_frames += frames
+                else:
+                    continue
+                break
 
-        # Pass 1: emit each segment at its natural pace. We use
-        # ``previous_end`` (the actual end of the previous segment in the
-        # merged track) as the running anchor. The silence prefix is
-        # always the difference between the previous segment's end and
-        # this cue's nominal start, capped at 0 (no negative silence -
-        # that would mean the audio of this segment has to start before
-        # the previous one ends, which the concat demuxer cannot do).
-        # When the previous segment is still playing at this cue's start,
-        # the silence prefix is 0 and this segment is queued right after
-        # the previous one. Pass 2 will speed the previous segment up
-        # later so this segment can begin at its SRT start time without
-        # the 50ms safety gap that the previous implementation used.
-        #
-        # The previous 50ms guard was the source of the subtitle drift
-        # the user reported: every segment's ``actual_start`` was padded
-        # 50ms past the SRT ``start``, and that error compounded through
-        # the cue list, so the on-screen subtitle appeared noticeably
-        # later than the dubbed voice.
-        #
-        # We keep two files per segment: ``audio_path`` (the TTS MP3 we
-        # downloaded, never modified) and a working file that holds the
-        # atempo-adjusted audio after pass 2. The padded file is built
-        # last in pass 3 from the working audio + the final silence
-        # prefix, so re-pad never duplicates the audio.
-        build_specs: list[dict] = []  # one entry per segment, post-pass-1 state
-        previous_end = 0.0
-        for i, af in enumerate(sorted_files):
-            audio_path = af["audio_path"]
-            working_path = os.path.join(padded_dir, f"audio_{i:04d}.wav")
-            padded_path = os.path.join(padded_dir, f"padded_{i:04d}.wav")
-            start_seconds = max(float(af.get("start", 0.0)), 0.0)
-            # Normalize the TTS MP3 into a 44.1kHz stereo WAV the rest
-            # of the pipeline can probe and re-encode cheaply. Without
-            # this the concat demuxer would still work, but ``ffprobe``
-            # round-trips on MP3 metadata add a few hundred milliseconds
-            # per cue on long videos.
-            subprocess.run([
-                "ffmpeg", "-i", audio_path,
-                "-ar", "44100", "-ac", "2",
-                "-y", working_path,
-            ], capture_output=True, check=True, **hidden_subprocess_kwargs())
-            segment_duration = _probe_duration_seconds(working_path)
-            # ``silence_prefix`` is exactly the gap between the previous
-            # segment's end and this cue's nominal start. ``max(..., 0)``
-            # drops any negative gap (overlap) to zero so the concat
-            # demuxer can still join the files; the overlap is fixed in
-            # pass 2 by atempo on the offending segment.
-            silence_prefix = max(start_seconds - previous_end, 0.0)
-            try:
-                cue_index = int(af.get("index", i))
-            except (TypeError, ValueError):
-                cue_index = i
-            actual_start = previous_end + silence_prefix
-            actual_end = actual_start + segment_duration
-            build_specs.append({
-                "working_path": working_path,
-                "padded_path": padded_path,
-                "cue_index": cue_index,
-                "start_seconds": start_seconds,
-                "natural_duration": segment_duration,
-                "silence_prefix": silence_prefix,
-                "actual_start": actual_start,
-                "actual_end": actual_end,
-            })
-            previous_end = actual_end
-
-        # Pass 2: detect overlaps and speed up the offending segment.
-        # ``actual_end`` of segment N can land after ``start_seconds`` of
-        # segment N+1; that means segment N is still playing when the next
-        # cue is supposed to start. We re-emit segment N with atempo so it
-        # ends exactly at ``start_seconds`` (the next cue's nominal start)
-        # rather than its natural ``actual_end``, then anchor every later
-        # segment that has slack back to its SRT ``start_seconds`` so the
-        # rebuilt subtitle SRT lines up with the on-disk audio.
-        for i, spec in enumerate(build_specs):
-            # Where does this segment have to end? Either the next cue's
-            # nominal start (most cases) or the video's end (last cue).
-            # Capping at ``total_duration`` matters for the final cue: if
-            # it overruns the video, we want atempo to land it on the
-            # actual end of the track rather than the trimmed cut point.
-            if i + 1 < len(build_specs):
-                required_end = build_specs[i + 1]["start_seconds"]
-            else:
-                required_end = total_duration
-            overlap_window = spec["actual_end"] - required_end
-            if overlap_window <= 0.0:
-                # The next cue (or the end of the file) starts after this
-                # segment finishes naturally, so no atempo is needed.
-                continue
-            # Available time: how much of the segment we can keep before
-            # the required end. ``actual_start`` is where the audio really
-            # begins (after the silence prefix), and we want it to end at
-            # ``required_end`` (the next cue's start or the video end).
-            available = required_end - spec["actual_start"]
-            natural = spec["natural_duration"]
-            if available <= 0.0 or natural <= 0.0:
-                # Not enough room to even start the audio before the next
-                # cue. Truncate to a short click; better than total overlap.
-                available = 0.0
-            speed = natural / available if available > 0 else 4.0
-            # Cap at 4x; above that the voice becomes unintelligible and
-            # the alignment is barely better than the previous drop-gap
-            # behavior. We do still apply the cap so the audio has a
-            # chance of fitting, even if imperfectly.
-            if speed > 4.0:
-                logger.warning(
-                    "Cue %s is %.2fs but only %.2fs of headroom remains; "
-                    "capping speed-up at 4x (audio will still slightly "
-                    "overlap the next cue)",
-                    spec["cue_index"], natural, available,
-                )
-                speed = 4.0
-            if speed <= 1.001:
-                # Within 0.1% of 1x: leave the segment as is. The overlap
-                # is small enough that the small drift is inaudible.
-                continue
-            logger.info(
-                "Cue %s overruns the required end %.2fs by %.2fs; applying "
-                "atempo %.2fx to fit it inside the cue window",
-                spec["cue_index"], required_end, overlap_window, speed,
-            )
-            atempo_filter = _atempo_chain(speed)
-            new_actual_end = spec["actual_start"] + (natural / speed)
-            # Re-encode the working audio with atempo. The working file
-            # only holds the audio (no silence prefix), so re-running
-            # atempo here just changes its duration; pass 3 will wrap
-            # the new silence around it. ffmpeg refuses to write to the
-            # same file it reads, so we stage the output in a sibling
-            # WAV temp file and atomically swap it in. The temp file
-            # must keep the ``.wav`` extension so ffmpeg picks the WAV
-            # muxer - naming it ``audio_0002.wav.tmp`` (or anything
-            # without a known container extension) makes the muxer
-            # refuse to open it.
-            working_dir = os.path.dirname(spec["working_path"])
-            temp_out = os.path.join(working_dir, f"{spec['cue_index']:04d}_atempo.tmp.wav")
-            subprocess.run([
-                "ffmpeg",
-                "-i", spec["working_path"],
-                "-af", atempo_filter,
-                "-ar", "44100", "-ac", "2",
-                "-y", temp_out,
-            ], capture_output=True, check=True, **hidden_subprocess_kwargs())
-            os.replace(temp_out, spec["working_path"])
-            spec["actual_end"] = new_actual_end
-            # Anchor the next cue to its SRT start: atempo just pulled
-            # this segment's end back to ``required_end`` (== the next
-            # cue's SRT start), so the next segment's silence prefix is
-            # now exactly zero and ``actual_start`` snaps to the SRT
-            # start. The duration of the next segment is preserved by
-            # shifting its end by the same delta.
-            if i + 1 < len(build_specs):
-                next_spec = build_specs[i + 1]
-                delta = next_spec["actual_start"] - next_spec["start_seconds"]
-                if delta != 0.0:
-                    next_spec["actual_start"] = next_spec["start_seconds"]
-                    next_spec["actual_end"] -= delta
-            # Pull every later cue back to its SRT start as well. Each
-            # one had its ``actual_start`` pushed forward by the
-            # overlap; once the overlap is gone, the slack can be
-            # absorbed. We cap at the SRT start to avoid overshooting.
-            for j in range(i + 2, len(build_specs)):
-                later = build_specs[j]
-                delta = later["actual_start"] - later["start_seconds"]
-                if delta > 0.0:
-                    later["actual_start"] = later["start_seconds"]
-                    later["actual_end"] -= delta
-
-        # Pass 3: build each padded file from the (possibly atempo'd)
-        # working audio + the final silence prefix. We never re-pad an
-        # already-padded file because doing so would double-count the
-        # audio inside it. ``actual_start`` and ``actual_end`` are
-        # already in their final positions thanks to pass 2, so the
-        # silence prefix is simply ``actual_start - previous_end`` (>= 0).
-        list_lines: list[str] = []
-        previous_end = 0.0
-        for spec in build_specs:
-            silence_prefix = max(spec["actual_start"] - previous_end, 0.0)
-            # Match the millisecond precision used by the silence generator.
-            silence_prefix = round(silence_prefix, 3)
-            actual_start = previous_end + silence_prefix
-            speech_duration = _probe_duration_seconds(spec["working_path"])
-            if silence_prefix > 0.0:
-                subprocess.run([
-                    "ffmpeg",
-                    "-f", "lavfi", "-i", f"aevalsrc=0:d={silence_prefix:.3f}:s=44100:c=mono",
-                    "-i", spec["working_path"],
-                    "-filter_complex", "[0:a][1:a]concat=n=2:v=0:a=1[out]",
-                    "-map", "[out]",
-                    "-ar", "44100", "-ac", "2",
-                    "-y", spec["padded_path"],
-                ], capture_output=True, check=True, **hidden_subprocess_kwargs())
-            else:
-                # No silence prefix; the working audio *is* the padded
-                # file (a direct copy is enough since the format
-                # already matches).
-                subprocess.run([
-                    "ffmpeg",
-                    "-i", spec["working_path"],
-                    "-ar", "44100", "-ac", "2",
-                    "-y", spec["padded_path"],
-                ], capture_output=True, check=True, **hidden_subprocess_kwargs())
-            spec["silence_prefix"] = silence_prefix
-            list_lines.append(f"file '{_escape_ffmpeg_path(spec['padded_path'])}'")
-            spec["actual_start"] = actual_start
-            spec["actual_end"] = min(actual_start + speech_duration, total_duration)
-            previous_end += _probe_duration_seconds(spec["padded_path"])
-
-        # Snapshot the final positions for the caller. ``actual_segments``
-        # must reflect what the on-disk audio actually contains so the
-        # rebuilt subtitle SRT lines up with the voice.
-        actual_segments = [
-            (spec["cue_index"], spec["actual_start"], spec["actual_end"])
-            for spec in build_specs
-            if spec["actual_start"] < total_duration
-        ]
-
-        with open(concat_list_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(list_lines) + "\n")
-
-        # Trim the concatenated stream to the video duration so we do not
-        # leak audio past the last cue.
+        # rf64 keeps the WAV valid beyond 4 GB (about 6.7 hours of stereo).
         subprocess.run([
-            "ffmpeg",
-            "-f", "concat", "-safe", "0",
-            "-i", concat_list_path,
-            "-af", f"atrim=0:{total_duration:.3f},asetpts=PTS-STARTPTS",
-            "-ar", "44100", "-ac", "2",
+            "ffmpeg", "-v", "error",
+            "-f", "s16le", "-ar", str(MERGE_SAMPLE_RATE), "-ac", str(MERGE_CHANNELS),
+            "-i", raw_path, "-c:a", "pcm_s16le", "-rf64", "auto",
             "-y", output_path,
         ], capture_output=True, check=True, **hidden_subprocess_kwargs())
     finally:
-        if os.path.isdir(padded_dir):
-            shutil.rmtree(padded_dir, ignore_errors=True)
-        if os.path.exists(concat_list_path):
-            os.remove(concat_list_path)
+        if os.path.exists(raw_path):
+            os.remove(raw_path)
 
     return output_path, actual_segments
 

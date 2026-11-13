@@ -1,5 +1,7 @@
 # PyInstaller onedir specification for the VideoDub desktop app on macOS.
 # Run with: pyinstaller --noconfirm --clean VideoDub_macos.spec
+import os
+import re
 from pathlib import Path
 
 from PyInstaller.building.build_main import Analysis, COLLECT, EXE, PYZ
@@ -11,6 +13,11 @@ ROOT = Path(SPEC).resolve().parents[1]
 BACKEND_DIR = ROOT / "backend"
 FRONTEND_DIST = ROOT / "frontend" / "dist"
 FFMPEG_DIR = ROOT / "desktop" / "vendor" / "ffmpeg"
+
+# Release version, e.g. "1.2.3". CI passes it from the git tag (v1.2.3).
+APP_VERSION = (os.environ.get("VIDEODUB_VERSION") or "1.0.0").lstrip("vV")
+_numbers = [int(part) for part in re.findall(r"\d+", APP_VERSION)[:4]]
+VERSION_TUPLE = tuple((_numbers + [0, 0, 0, 0])[:4])
 
 
 datas = [
@@ -56,6 +63,13 @@ for distribution in ('yt-dlp', 'curl_cffi', 'pytubefix', 'edge-tts',
 
 icon_path = ROOT / "desktop" / "VideoDub.icns"
 
+import sys
+
+sys.path.insert(0, str(ROOT / "desktop"))
+from packaging_utils import shorten_metadata_paths  # noqa: E402
+
+datas = shorten_metadata_paths(datas, workpath)
+
 analysis = Analysis(
     [str(ROOT / "desktop" / "desktop_main.py")],
     pathex=[str(BACKEND_DIR)],
@@ -78,7 +92,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     icon=str(icon_path) if icon_path.is_file() else None,
 )
@@ -87,7 +101,7 @@ coll = COLLECT(
     analysis.binaries,
     analysis.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name="VideoDub",
 )
@@ -97,4 +111,13 @@ app = BUNDLE(
     name="VideoDub.app",
     icon=str(icon_path) if icon_path.is_file() else None,
     bundle_identifier="com.videodub.desktop",
+    info_plist={
+        "CFBundleName": "VideoDub",
+        "CFBundleDisplayName": "VideoDub",
+        "CFBundleShortVersionString": APP_VERSION,
+        "CFBundleVersion": ".".join(str(part) for part in VERSION_TUPLE[:3]),
+        "NSHighResolutionCapable": True,
+        "LSApplicationCategoryType": "public.app-category.video",
+        "NSHumanReadableCopyright": os.environ.get("VIDEODUB_PUBLISHER", "VideoDub"),
+    },
 )

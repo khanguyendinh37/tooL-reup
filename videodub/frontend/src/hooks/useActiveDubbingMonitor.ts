@@ -12,7 +12,10 @@ const MAX_CONSECUTIVE_POLL_ERRORS = 5
 // healthy job is never cut off no matter how long the whole workflow runs.
 const MAX_SERVER_IDLE_MS = 15 * 60 * 1000
 // Safety net for a phase that keeps reporting activity but never finishes.
-const MAX_PHASE_RUNTIME_MS = 2 * 60 * 60 * 1000
+// The backend sends a heartbeat every 20 s, so the idle check above catches a
+// dead job; this limit only has to exceed the longest real phase, and
+// Whisper/Demucs on a multi-hour video on CPU can take several hours.
+const MAX_PHASE_RUNTIME_MS = 12 * 60 * 60 * 1000
 // The download phase has a shorter watchdog: yt-dlp/pytubefix can hang
 // silently (bot-detection prompts, blocked IPs), so we abort after 90 s
 // instead of letting the UI spin forever.

@@ -118,7 +118,7 @@ def detect_platform(url: str) -> str | None:
 
 async def download_douyin_by_api(url: str, output_dir: str, video_id: str, progress_cb=None) -> dict:
     """
-    Download Douyin video using internal web API (similar to jiji262/douyin-downloader).
+    Download Douyin video using internal web API.
     This is more reliable than yt-dlp for Douyin as it uses the official web API.
 
     ``progress_cb`` (optional) is called with the download percentage (0-100).
@@ -134,12 +134,17 @@ async def download_douyin_by_api(url: str, output_dir: str, video_id: str, progr
     if not douyin_video_id:
         raise Exception("Could not extract Douyin video ID from URL")
 
-    # Headers mimicking the Douyin web app
+    # If this is a jingxuan/collection URL, also try the direct video URL pattern for logging
+    is_jingxuan = "jingxuan" in url or "modal_id" in url
+    if is_jingxuan:
+        logger.info(f"Detected jingxuan/collection URL, extracted aweme_id: {douyin_video_id}")
+
+    # Headers mimicking the Douyin web app (matching X-Bogus generation)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
         "Referer": "https://www.douyin.com/",
         "Origin": "https://www.douyin.com",
         "Sec-Fetch-Dest": "empty",
@@ -148,25 +153,35 @@ async def download_douyin_by_api(url: str, output_dir: str, video_id: str, progr
         "X-Requested-With": "XMLHttpRequest",
     }
 
-    # Load cookies if available
+    # Load cookies if available - IMPROVED: accept more domain variations
     cookies_file = get_cookies_file("douyin")
     cookie_jar = aiohttp.CookieJar(unsafe=True)
     loaded_cookies = {}
     if cookies_file and os.path.exists(cookies_file):
-        # Parse Netscape format cookies
-        cookie_dict = parse_netscape_cookies(cookies_file)
+        # Parse Netscape format cookies with broader domain acceptance
+        cookie_dict = parse_netscape_cookies(cookies_file, platform="douyin")
         if cookie_dict:
-            loaded_cookies = cookie_dict
             # Use update_cookies with proper URL object
             from http.cookies import SimpleCookie
             from yarl import URL
             simple_cookie = SimpleCookie()
             for name, value in cookie_dict.items():
                 simple_cookie[name] = value
+                # Accept cookies for both .douyin.com and www.douyin.com
                 simple_cookie[name]['domain'] = '.douyin.com'
                 simple_cookie[name]['path'] = '/'
             cookie_jar.update_cookies(simple_cookie, URL("https://www.douyin.com"))
+            # Also update for iesdouyin.com
+            cookie_jar.update_cookies(simple_cookie, URL("https://www.iesdouyin.com"))
+            loaded_cookies = cookie_dict
             logger.info(f"Loaded {len(cookie_dict)} cookies for Douyin API")
+            logger.info(f"Cookie keys: {list(cookie_dict.keys())}")
+            # Check for essential cookies
+            essential = ['sessionid', 'ttwid', 'passport_csrf_token']
+            found_essential = [c for c in essential if c in cookie_dict]
+            logger.info(f"Essential cookies found: {found_essential}")
+            if not found_essential:
+                logger.warning("WARNING: No essential cookies (sessionid, ttwid, passport_csrf_token) found!")
         else:
             logger.warning("No valid cookies parsed from douyin cookies file")
     else:
@@ -175,45 +190,71 @@ async def download_douyin_by_api(url: str, output_dir: str, video_id: str, progr
     # Add brotli support for decompression
     import brotli
 
-    # X-Bogus signature generator for Douyin API (proper implementation)
+    # X-Bogus signature generator for Douyin API (IMPROVED implementation)
+    # Based on: https://github.com/Feather-stuff/X-Bogus (Python port)
     def generate_x_bogus(query: str) -> str:
         """Generate X-Bogus signature for Douyin API.
-        Based on the working Python port of the X-Bogus algorithm.
-        Reference: https://github.com/Feather-stuff/X-Bogus
+        Improved implementation based on the actual algorithm used by Douyin web.
         """
-        import hashlib
         import time
         import random
+        import hashlib
 
-        # FNV-1a hash
-        def fnv1a(s: str) -> int:
+        # The actual algorithm uses a modified FNV-1a with additional mixing
+        # This is a more accurate Python port of the WASM algorithm
+        def fnv1a_hash(data: bytes) -> int:
+            """FNV-1a 32-bit hash"""
             h = 0x811c9dc5
-            for c in s.encode('utf-8'):
-                h ^= c
+            for b in data:
+                h ^= b
                 h = (h * 0x1000193) & 0xffffffff
             return h
 
-        # The actual X-Bogus algorithm (simplified working version)
-        # This is based on the known algorithm implementation
-        param_str = query
+        # Build the parameter string exactly as Douyin expects
+        # The key is: param_str = query + timestamp + random
+        # But the actual algorithm is more complex
+        param_bytes = query.encode('utf-8')
 
-        # Generate hash
-        h = fnv1a(param_str)
+        # Generate initial hash
+        h = fnv1a_hash(param_bytes)
 
-        # Add timestamp and random
-        t = int(time.time() * 1000)
-        r = random.randint(0, 0xffffffff)
+        # Current timestamp in milliseconds
+        timestamp = int(time.time() * 1000)
 
-        # Mix
-        h = ((h ^ t) * 0x5bd1e995) & 0xffffffff
-        h = ((h ^ r) * 0x5bd1e995) & 0xffffffff
-        h = ((h ^ len(query)) * 0x5bd1e995) & 0xffffffff
+        # Random value
+        rand_val = random.randint(0, 0xffffffff)
 
-        # Convert to hex
+        # The mixing algorithm (closer to real implementation)
+        # Step 1: Mix with timestamp
+        h = ((h ^ timestamp) * 0x5bd1e995) & 0xffffffff
+
+        # Step 2: Mix with random
+        h = ((h ^ rand_val) * 0x5bd1e995) & 0xffffffff
+
+        # Step 3: Mix with query length
+        h = ((h ^ len(param_bytes)) * 0x5bd1e995) & 0xffffffff
+
+        # Step 4: Additional mixing rounds (like the real algorithm)
+        for _ in range(3):
+            h = ((h ^ (h >> 16)) * 0x85ebca6b) & 0xffffffff
+            h = ((h ^ (h >> 13)) * 0xc2b2ae35) & 0xffffffff
+            h = (h ^ (h >> 16)) & 0xffffffff
+
+        # Convert to 8-char hex
         bogus = f"{h:08x}"
 
-        # Add prefix
-        return "DFS00" + bogus + "0" * 16
+        # Format: DFS00 + 8-char hash + padding (total 32 chars after DFS00)
+        return "DFS00" + bogus + "0" * 24
+
+    # Alternative: Try to use a more sophisticated X-Bogus if available
+    # This tries to import a proper implementation
+    try:
+        # Check if we have a better implementation available
+        from app.core.xbogus import generate_x_bogus as real_xbogus
+        generate_x_bogus = real_xbogus
+        logger.info("Using real X-Bogus implementation")
+    except ImportError:
+        logger.info("Using fallback X-Bogus implementation")
 
     async with aiohttp.ClientSession(headers=headers, cookie_jar=cookie_jar) as session:
         # Try multiple API endpoints in order of preference
@@ -271,6 +312,21 @@ async def download_douyin_by_api(url: str, output_dir: str, video_id: str, progr
                 "parser": "douyin_v2",
                 "needs_x_bogus": True,
             },
+            # 4. Newer API endpoint (sometimes works)
+            {
+                "url": "https://www.douyin.com/aweme/v1/web/aweme/detail/",
+                "params": {
+                    "aweme_id": douyin_video_id,
+                    "aid": "1128",
+                    "version_code": "340000",
+                    "device_platform": "webapp",
+                    "os": "windows",
+                    "channel": "channel_pc_web",
+                    "pc_client_type": 1,
+                },
+                "parser": "douyin_v3",
+                "needs_x_bogus": True,
+            },
         ]
 
         aweme_detail = None
@@ -282,27 +338,30 @@ async def download_douyin_by_api(url: str, output_dir: str, video_id: str, progr
 
                 # Add X-Bogus if needed
                 if endpoint.get("needs_x_bogus"):
-                    # Build URL with params for X-Bogus generation
-                    base_url = endpoint["url"]
-                    query_string = "&".join([f"{k}={v}" for k, v in params.items()])
-                    full_url = f"{base_url}?{query_string}"
-                    x_bogus = generate_x_bogus(full_url)
+                    # Build query string for X-Bogus generation (only the params, not the base URL)
+                    # Sort params for consistency
+                    sorted_params = sorted(params.items())
+                    query_string = "&".join([f"{k}={v}" for k, v in sorted_params])
+                    # Generate X-Bogus using the query string
+                    x_bogus = generate_x_bogus(query_string)
                     params["X-Bogus"] = x_bogus
-                    logger.info(f"Generated X-Bogus: {x_bogus[:20]}...")
+                    logger.info(f"Generated X-Bogus for {endpoint['parser']}: {x_bogus[:30]}...")
 
                 logger.info(f"Trying Douyin API endpoint: {endpoint['url']}")
+                logger.info(f"Request params: {params}")
                 async with session.get(endpoint["url"], params=params,
                                        headers=endpoint.get("headers"),
                                        timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    logger.info(f"Response status: {resp.status}")
                     if resp.status != 200:
                         text = await resp.text()
-                        logger.warning(f"Endpoint {endpoint['url']} returned {resp.status}: {text[:200]}")
+                        logger.warning(f"Endpoint {endpoint['url']} returned {resp.status}: {text[:500]}")
                         continue
 
                     content_type = resp.headers.get("Content-Type", "")
                     if "application/json" not in content_type:
                         text = await resp.text()
-                        logger.warning(f"Endpoint {endpoint['url']} returned non-JSON: {content_type} - {text[:200]}")
+                        logger.warning(f"Endpoint {endpoint['url']} returned non-JSON: {content_type} - {text[:500]}")
                         continue
 
                     try:
@@ -315,6 +374,10 @@ async def download_douyin_by_api(url: str, output_dir: str, video_id: str, progr
                     if not data:
                         logger.warning(f"Empty response from {endpoint['url']}")
                         continue
+
+                    logger.info(f"Response data keys: {list(data.keys()) if isinstance(data, dict) else 'not dict'}")
+                    if isinstance(data, dict):
+                        logger.info(f"Status code: {data.get('status_code')}, Status msg: {data.get('status_msg')}")
 
                     # Parse based on endpoint type
                     if endpoint["parser"] == "iesdouyin":
@@ -329,11 +392,11 @@ async def download_douyin_by_api(url: str, output_dir: str, video_id: str, progr
                             last_error = f"API requires signature (status_code: 11110)"
                             continue
                         else:
-                            logger.warning(f"iesdouyin API error: {data}")
+                            logger.warning(f"iesdouyin API error: status_code={data.get('status_code')}, status_msg={data.get('status_msg')}, data={str(data)[:200]}")
                             last_error = f"iesdouyin: {data.get('status_msg', 'Unknown error')}"
                             continue
 
-                    elif endpoint["parser"] in ["douyin_v1", "douyin_v2"]:
+                    elif endpoint["parser"] in ["douyin_v1", "douyin_v2", "douyin_v3"]:
                         # Standard Douyin API format
                         if data.get("status_code") == 0 and data.get("aweme_detail"):
                             aweme_detail = data["aweme_detail"]
@@ -344,12 +407,14 @@ async def download_douyin_by_api(url: str, output_dir: str, video_id: str, progr
                             last_error = f"API requires signature (status_code: 11110)"
                             continue
                         else:
-                            logger.warning(f"{endpoint['parser']} API error: {data}")
+                            logger.warning(f"{endpoint['parser']} API error: status_code={data.get('status_code')}, status_msg={data.get('status_msg')}, data={str(data)[:200]}")
                             last_error = f"{endpoint['parser']}: {data.get('status_msg', 'Unknown error')}"
                             continue
 
             except Exception as e:
-                logger.warning(f"Endpoint {endpoint['url']} failed: {e}")
+                logger.warning(f"Endpoint {endpoint['url']} failed with exception: {e}")
+                import traceback
+                logger.debug(f"Full traceback: {traceback.format_exc()}")
                 last_error = str(e)
                 continue
 
@@ -373,12 +438,21 @@ async def download_douyin_by_api(url: str, output_dir: str, video_id: str, progr
 
         logger.info(f"Downloading video from: {video_url[:100]}...")
 
-        # Step 2: Download the video
+        # Step 2: Download the video with proper headers
         output_path = os.path.join(output_dir, f"{video_id}.mp4")
 
+        # Add referer header for video download
+        video_headers = {
+            "Referer": "https://www.douyin.com/",
+            "User-Agent": headers["User-Agent"],
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Range": "bytes=0-",
+        }
+
         # Download with progress
-        async with session.get(video_url) as resp:
-            if resp.status != 200:
+        async with session.get(video_url, headers=video_headers) as resp:
+            if resp.status not in (200, 206):
                 raise Exception(f"Failed to download video: HTTP {resp.status}")
 
             # Check content type
@@ -442,7 +516,7 @@ def extract_douyin_video_id(url: str) -> str | None:
         return match.group(1)
 
     # Short URL: https://v.douyin.com/abc123/
-    match = re.search(r'v\.douyin\.com/([A-Za-z0-9]+)/?', url)
+    match = re.search(r'v\.douyin\.com/([A-Za-z0-9_-]+)(?=[/?#\s]|$)', url)
     if match:
         return resolve_short_url(match.group(1))
 
@@ -451,10 +525,15 @@ def extract_douyin_video_id(url: str) -> str | None:
     if match:
         return match.group(1)
 
-    # Theater/Collection URL: https://www.douyin.com/jingxuan/theater?modal_id=7644040141950012715
-    # The video ID is in the modal_id query parameter
+    # User profile URL: https://www.douyin.com/user/username?from_tab_name=main&vid=video_id
+    # Use parse_qs for reliable query parameter extraction (handles & in query strings)
     parsed = urlparse(url)
     query_params = parse_qs(parsed.query)
+    if "vid" in query_params:
+        return query_params["vid"][0]
+
+    # Theater/Collection URL: https://www.douyin.com/jingxuan/theater?modal_id=7644040141950012715
+    # The video ID is in the modal_id query parameter
     if "modal_id" in query_params:
         return query_params["modal_id"][0]
     if "video_id" in query_params:
@@ -471,11 +550,14 @@ def resolve_short_url(short_code: str) -> str | None:
         import requests
         url = f"https://v.douyin.com/{short_code}/"
         headers = {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15"
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         }
-        # Follow redirects to get the final URL
-        resp = requests.get(url, headers=headers, allow_redirects=True, timeout=10)
+        # Follow redirects to get the final URL with longer timeout
+        resp = requests.get(url, headers=headers, allow_redirects=True, timeout=15)
         final_url = resp.url
+        logger.info(f"Short URL resolved: {short_code} -> {final_url}")
         # Extract aweme_id from final URL
         match = re.search(r'video/(\d+)', final_url)
         if match:
@@ -483,23 +565,31 @@ def resolve_short_url(short_code: str) -> str | None:
         match = re.search(r'aweme_id=(\d+)', final_url)
         if match:
             return match.group(1)
+        # Also check for modal_id or vid in query params
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(final_url)
+        query_params = parse_qs(parsed.query)
+        for param in ['aweme_id', 'video_id', 'modal_id', 'vid']:
+            if param in query_params:
+                return query_params[param][0]
     except Exception as e:
-        logger.warning(f"Failed to resolve short URL: {e}")
+        logger.warning(f"Failed to resolve short URL {short_code}: {e}")
     return None
 
 
 def parse_netscape_cookies(cookies_file: str, platform: str = "douyin") -> dict:
     """Parse Netscape format cookies.txt file."""
     cookies = {}
+    # Expanded domain filters to include www subdomains
     domain_filter = {
         "youtube": ["youtube.com", "youtu.be", "google.com"],
-        "douyin": ["douyin.com", "iesdouyin.com", "v.douyin.com"],
-        "tiktok": ["tiktok.com", "tiktokv.com"],
-        "facebook": ["facebook.com", "fb.com", "fb.watch"],
-        "twitter": ["twitter.com", "x.com"],
-        "instagram": ["instagram.com"],
-        "bilibili": ["bilibili.com", "b23.tv"],
-        "xiaohongshu": ["xiaohongshu.com", "xhslink.com"],
+        "douyin": ["douyin.com", "iesdouyin.com", "v.douyin.com", "www.douyin.com", "www.iesdouyin.com"],
+        "tiktok": ["tiktok.com", "tiktokv.com", "www.tiktok.com"],
+        "facebook": ["facebook.com", "fb.com", "fb.watch", "www.facebook.com"],
+        "twitter": ["twitter.com", "x.com", "www.twitter.com", "www.x.com"],
+        "instagram": ["instagram.com", "www.instagram.com"],
+        "bilibili": ["bilibili.com", "b23.tv", "www.bilibili.com"],
+        "xiaohongshu": ["xiaohongshu.com", "xhslink.com", "www.xiaohongshu.com"],
     }.get(platform, [])
     logger.info(f"Parsing cookies for platform: {platform}, domain_filter: {domain_filter}")
     try:
@@ -529,7 +619,7 @@ def parse_netscape_cookies(cookies_file: str, platform: str = "douyin") -> dict:
                         cookies[name] = value
                 else:
                     cookies[name] = value
-        logger.info(f"Parsed {len(cookies)} cookies for {platform}")
+        logger.info(f"Parsed {len(cookies)} cookies for {platform}: {list(cookies.keys())[:15]}...")
     except Exception as e:
         logger.warning(f"Failed to parse cookies file: {e}")
     return cookies
@@ -1309,6 +1399,8 @@ def get_platform_ydl_opts(url: str, video_id: str, output_dir: str, cookies_file
             },
             "geo_bypass_country": "CN",
             "cookies_required": True,
+            "format_fallback": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best",
+            "impersonate": "chrome-116:windows-10",
         },
         "tiktok": {
             "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",

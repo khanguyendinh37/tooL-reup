@@ -12,12 +12,14 @@ VideoDub là công cụ lồng tiếng video tự động sử dụng AI: tải 
 
 | Nền tảng | Tải xuống | Yêu cầu |
 |----------|-----------|---------|
-| 🪟 **Windows** | [Tải VideoDub-windows.zip](https://github.com/khanguyendinh37/tooL-reup/releases/latest/download/VideoDub-windows.zip) | Windows 10/11 + WebView2 Runtime (có sẵn) |
-| 🍎 **macOS** | [Tải VideoDub-macos.zip](https://github.com/khanguyendinh37/tooL-reup/releases/latest/download/VideoDub-macos.zip) | macOS 12+ (Monterey), chưa notarize |
+| 🪟 **Windows** | [`VideoDub-Setup-<phiên bản>.exe`](https://github.com/khanguyendinh37/tooL-reup/releases/latest) (bộ cài) hoặc `…-windows-portable.zip` | Windows 10/11 64-bit |
+| 🍎 **macOS** | [`VideoDub-<phiên bản>-macos-arm64.dmg`](https://github.com/khanguyendinh37/tooL-reup/releases/latest) | Mac chip Apple (M1+); Mac Intel không hỗ trợ |
 
 > **Cài nhanh**:
-> - **Windows**: giải nén toàn bộ thư mục → chạy `Start-VideoDub.bat`. File này bỏ chặn các file trong riêng thư mục VideoDub rồi mở app, giúp tránh lỗi `Python.Runtime.Loader.Initialize`. Sau lần đầu có thể mở trực tiếp `VideoDub.exe`.
-> - **macOS**: giải nén → chuột phải `VideoDub.app` → **Open** (lần đầu để vượt Gatekeeper) → kéo vào Applications.
+> - **Windows**: chạy `VideoDub-Setup-….exe` (không cần quyền admin, tự cài WebView2 nếu thiếu). Với bản portable `.zip`: giải nén → chạy `Start-VideoDub.bat` lần đầu (bỏ chặn file tải từ mạng, tránh lỗi `Python.Runtime.Loader.Initialize`).
+> - **macOS**: mở `.dmg` → kéo `VideoDub` vào Applications. Nếu bản phát hành chưa notarize, lần đầu cần vào System Settings → Privacy & Security → **Open Anyway**.
+>
+> Quy trình build, ký số và phát hành cho khách: [videodub/desktop/RELEASE.md](videodub/desktop/RELEASE.md).
 
 > Các link trên tải bản Release chính thức mới nhất. Nếu chưa có bản phát hành, vào [Actions](https://github.com/khanguyendinh37/tooL-reup/actions/workflows/build-release.yml) → chọn lượt build thành công → **Artifacts** để tải bản build, hoặc xem [tất cả Releases](https://github.com/khanguyendinh37/tooL-reup/releases).
 

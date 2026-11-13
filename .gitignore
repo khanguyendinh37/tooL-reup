@@ -100,3 +100,5 @@ Thumbs.db
 
 # Misc artifacts
 =*
+videodub/desktop/installer/MicrosoftEdgeWebview2Setup.exe
+videodub/desktop/macos/*.dmg

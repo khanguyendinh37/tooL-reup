@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Phiên bản (ví dụ: 1.0.0). Bỏ trống nếu push tag v*."
+        description: "Phiên bản để tạo Release (ví dụ: 1.0.0). Bỏ trống = build thử, chỉ tải file trong trang Actions."
         required: false
         default: ""
 
@@ -21,10 +21,26 @@ jobs:
   # ---------------------------------------------------------------------------
   build-windows:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
+    env:
+      # Code signing runs only when the Azure Artifact Signing secrets exist
+      # (see videodub/desktop/RELEASE.md). Without them the build still
+      # succeeds but SmartScreen warns customers.
+      HAS_WIN_SIGNING: ${{ secrets.AZURE_CLIENT_ID != '' }}
+      VIDEODUB_PUBLISHER: ${{ vars.VIDEODUB_PUBLISHER || 'VideoDub' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Resolve version
+        shell: bash
+        run: |
+          version="${{ github.event.inputs.version }}"
+          if [ -z "$version" ] && [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME}"
+          fi
+          version="${version#v}"
+          echo "VIDEODUB_VERSION=${version:-0.0.0}" >> "$GITHUB_ENV"
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -49,6 +65,7 @@ jobs:
           ffprobe -version
 
       - name: Build Windows Desktop
+        # VIDEODUB_VERSION / VIDEODUB_PUBLISHER are read by VideoDub.spec.
         shell: cmd
         working-directory: videodub
         run: |
@@ -73,31 +90,94 @@ jobs:
           path: '*-runtime.json'
           if-no-files-found: warn
 
-      - name: Zip Windows artifact (PowerShell)
+      - name: Sign VideoDub.exe (Azure Artifact Signing)
+        if: env.HAS_WIN_SIGNING == 'true'
+        uses: azure/artifact-signing-action@v2.0.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERTIFICATE_PROFILE }}
+          files: ${{ github.workspace }}\videodub\desktop\dist\VideoDub\VideoDub.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ISCC.exe -ErrorAction SilentlyContinue)) {
+            if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+              choco install innosetup -y --no-progress
+            }
+            "${env:ProgramFiles(x86)}\Inno Setup 6" >> $env:GITHUB_PATH
+          }
+
+      - name: Build Windows installer
+        shell: cmd
+        working-directory: videodub/desktop
+        run: |
+          call installer\build_installer.bat %VIDEODUB_VERSION%
+
+      - name: Sign installer (Azure Artifact Signing)
+        if: env.HAS_WIN_SIGNING == 'true'
+        uses: azure/artifact-signing-action@v2.0.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERTIFICATE_PROFILE }}
+          files-folder: ${{ github.workspace }}\videodub\desktop\dist\installer
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Zip portable Windows build (PowerShell)
         shell: pwsh
         run: |
           Compress-Archive `
             -Path videodub/desktop/dist/VideoDub `
-            -DestinationPath videodub/desktop/dist/VideoDub-windows.zip `
+            -DestinationPath "videodub/desktop/dist/installer/VideoDub-$env:VIDEODUB_VERSION-windows-portable.zip" `
             -Force
 
-      - name: Upload Windows artifact
+      - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: windows-zip
-          path: videodub/desktop/dist/VideoDub-windows.zip
+          name: windows-release
+          path: videodub/desktop/dist/installer/*
           if-no-files-found: error
           retention-days: 7
 
   # ---------------------------------------------------------------------------
   # 2) Build macOS .app, zip bằng `ditto` (preserve bundle metadata).
   # ---------------------------------------------------------------------------
+  # Apple Silicon only: torch>=2.3 publishes no macOS x86_64 wheels, so an
+  # Intel build is not possible with the pinned dependencies.
   build-macos:
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 180
+    env:
+      # Developer ID signing + notarization run only when the secrets exist
+      # (see videodub/desktop/RELEASE.md); otherwise the app is ad-hoc signed.
+      HAS_MAC_SIGNING: ${{ secrets.MACOS_CERTIFICATE != '' }}
+      VIDEODUB_PUBLISHER: ${{ vars.VIDEODUB_PUBLISHER || 'VideoDub' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Resolve version
+        run: |
+          version="${{ github.event.inputs.version }}"
+          if [ -z "$version" ] && [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME}"
+          fi
+          version="${version#v}"
+          echo "VIDEODUB_VERSION=${version:-0.0.0}" >> "$GITHUB_ENV"
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -143,6 +223,37 @@ jobs:
           path: '*-runtime.json'
           if-no-files-found: warn
 
+      - name: Import Developer ID certificate
+        if: env.HAS_MAC_SIGNING == 'true'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/videodub-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          echo "MACOS_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+
+      - name: Sign, build DMG and notarize
+        env:
+          MACOS_SIGN_IDENTITY: ${{ env.HAS_MAC_SIGNING == 'true' && secrets.MACOS_SIGN_IDENTITY || '-' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          chmod +x videodub/desktop/macos/package_macos.sh
+          ./videodub/desktop/macos/package_macos.sh "$VIDEODUB_VERSION"
+
+      # Runs after signing so a missing hardened-runtime entitlement shows up
+      # here instead of on a customer's Mac.
       - name: Verify native macOS window and Finder launch
         run: |
           videodub/backend/.venv/bin/python videodub/desktop/verify_startup.py videodub/desktop/dist/VideoDub.app/Contents/MacOS/VideoDub macos-startup/direct
@@ -155,17 +266,11 @@ jobs:
             find macos-startup -type f \( -name '*.log' -o -name 'startup.json' \) -print -exec tail -n 100 {} \;
           fi
 
-      - name: Zip macOS artifact (ditto)
-        run: |
-          ditto -c -k --sequesterRsrc --keepParent \
-            videodub/desktop/dist/VideoDub.app \
-            videodub/desktop/dist/VideoDub-macos.zip
-
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: macos-zip
-          path: videodub/desktop/dist/VideoDub-macos.zip
+          name: macos-release
+          path: videodub/desktop/dist/VideoDub-*-macos-*.dmg
           if-no-files-found: error
           retention-days: 7
 
@@ -173,24 +278,27 @@ jobs:
   # 3) Tạo GitHub Release 1 lần duy nhất với cả 2 file zip.
   #    Chạy trên ubuntu (rẻ hơn, không cần Windows/macOS runner).
   # ---------------------------------------------------------------------------
+  # A manual run with an empty "version" is a test build: the installers stay
+  # as workflow artifacts (Actions run page) and no public Release is made.
   release:
     needs: [build-windows, build-macos]
+    if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.version != ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download Windows artifact
+      - name: Download Windows artifacts
         uses: actions/download-artifact@v4
         with:
-          name: windows-zip
+          name: windows-release
           path: artifacts/
 
       - name: Download macOS artifact
         uses: actions/download-artifact@v4
         with:
-          name: macos-zip
+          name: macos-release
           path: artifacts/
 
       - name: Create GitHub Release
@@ -201,31 +309,29 @@ jobs:
           tag_name: ${{ github.event.inputs.version || github.ref_name }}
           name: VideoDub ${{ github.event.inputs.version || github.ref_name }}
           files: |
-            artifacts/VideoDub-windows.zip
-            artifacts/VideoDub-macos.zip
+            artifacts/*
           generate_release_notes: true
           body: |
             ## VideoDub Desktop
 
-            Tải bản phù hợp với hệ điều hành của bạn:
+            Tải bản phù hợp với máy của bạn:
 
             | Nền tảng | File | Yêu cầu |
             |----------|------|---------|
-            | 🪟 **Windows** | `VideoDub-windows.zip` | Windows 10/11 + WebView2 Runtime |
-            | 🍎 **macOS** | `VideoDub-macos.zip` | macOS 12+ (Monterey) |
+            | 🪟 **Windows** (khuyên dùng) | `VideoDub-Setup-<phiên bản>.exe` | Windows 10/11 64-bit, RAM 8 GB+ (16 GB cho video dài) |
+            | 🪟 Windows bản portable | `VideoDub-<phiên bản>-windows-portable.zip` | Như trên + WebView2 Runtime |
+            | 🍎 **macOS** | `VideoDub-<phiên bản>-macos-arm64.dmg` | Mac chip Apple (M1 trở lên). Mac Intel không được hỗ trợ |
 
             ### Cài đặt
 
-            **Windows**:
-            1. Giải nén `VideoDub-windows.zip`
-            2. Double-click `VideoDub.exe`
-            3. Dữ liệu lưu tại `%LOCALAPPDATA%\VideoDub\`
+            **Windows**: chạy `VideoDub-Setup-….exe` → Next → Install. Không cần quyền admin;
+            bộ cài tự cài WebView2 nếu máy thiếu và tạo shortcut ở Start Menu / Desktop.
+            Dữ liệu lưu tại `%LOCALAPPDATA%\VideoDub\` và được giữ lại khi cập nhật hoặc gỡ cài đặt.
 
-            **macOS**:
-            1. Giải nén `VideoDub-macos.zip`
-            2. **Lần đầu**: chuột phải `VideoDub.app` → **Open** để vượt Gatekeeper (chưa notarize)
-            3. Sau đó kéo vào `/Applications`
-            4. Dữ liệu lưu tại `~/.local/share/VideoDub/`
+            **macOS**: mở file `.dmg` → kéo `VideoDub` vào thư mục `Applications`.
+            Dữ liệu lưu tại `~/.local/share/VideoDub/`.
+
+            Lần đầu lồng tiếng, ứng dụng tải model nhận dạng giọng nói (~500 MB) nên cần có mạng.
 
             ### Backend API (chỉ dev)
             - API: http://localhost:8000

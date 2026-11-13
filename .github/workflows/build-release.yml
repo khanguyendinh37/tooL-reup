@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Phiên bản (ví dụ: 1.0.0). Bỏ trống nếu push tag v*."
+        description: "Phiên bản để tạo Release (ví dụ: 1.0.0). Bỏ trống = build thử, chỉ tải file trong trang Actions."
         required: false
         default: ""
 
@@ -278,8 +278,11 @@ jobs:
   # 3) Tạo GitHub Release 1 lần duy nhất với cả 2 file zip.
   #    Chạy trên ubuntu (rẻ hơn, không cần Windows/macOS runner).
   # ---------------------------------------------------------------------------
+  # A manual run with an empty "version" is a test build: the installers stay
+  # as workflow artifacts (Actions run page) and no public Release is made.
   release:
     needs: [build-windows, build-macos]
+    if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.version != ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

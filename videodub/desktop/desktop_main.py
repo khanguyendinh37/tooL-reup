@@ -54,6 +54,28 @@ def _user_data_dir() -> Path:
     return Path.home() / ".local" / "share" / APP_NAME
 
 
+def _configure_ssl_certificates() -> None:
+    """Point OpenSSL at the bundled certifi CA file in packaged macOS/Linux builds.
+
+    The frozen interpreter's OpenSSL looks for CA certificates at the build
+    machine's path, which does not exist on customers' Macs, so every
+    urllib-based HTTPS download (Demucs model via torch.hub, translation APIs)
+    fails certificate verification. Windows reads the system store instead.
+    """
+    if not getattr(sys, "frozen", False) or sys.platform == "win32":
+        return
+    if os.environ.get("SSL_CERT_FILE"):
+        return
+    try:
+        import certifi
+    except ImportError:
+        return
+    ca_file = certifi.where()
+    if os.path.isfile(ca_file):
+        os.environ["SSL_CERT_FILE"] = ca_file
+        os.environ.setdefault("REQUESTS_CA_BUNDLE", ca_file)
+
+
 def _prepare_runtime() -> tuple[Path, Path]:
     project_root = _project_root()
     backend_root = _backend_root(project_root)
@@ -62,6 +84,7 @@ def _prepare_runtime() -> tuple[Path, Path]:
     if str(backend_root) not in sys.path:
         sys.path.insert(0, str(backend_root))
 
+    _configure_ssl_certificates()
     os.environ.setdefault("VIDEODUB_DATA_DIR", str(_user_data_dir()))
     os.environ.setdefault("VIDEODUB_FRONTEND_DIR", str(frontend_dist))
 

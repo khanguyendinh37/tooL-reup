@@ -59,6 +59,12 @@ def run_checks(report_path: str) -> None:
                                     text=True, check=True, timeout=20,
                                     **hidden_subprocess_kwargs())
             report['checks'][command] = result.stdout.splitlines()[0]
+        # Model/API downloads use urllib; a frozen macOS build without a CA
+        # bundle fails here instead of on the customer's first dubbing job.
+        import urllib.request
+        with urllib.request.urlopen('https://huggingface.co', timeout=30) as response:
+            response.read(1)
+        report['checks']['https'] = 'ok'
         # Exercise actual packaged binaries and our extraction code, not mocks.
         with tempfile.TemporaryDirectory(prefix='videodub-check-') as directory:
             video = str(Path(directory) / 'sample.mp4')

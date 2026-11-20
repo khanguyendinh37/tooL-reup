@@ -19,6 +19,14 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+import multiprocessing
+
+# Must run before anything else. On macOS/Linux, creating a multiprocessing
+# lock (tqdm progress bars during model downloads do this) starts a resource
+# tracker by re-running this executable. Without freeze_support() that child
+# runs the whole app again, opening new windows in a relaunch loop.
+multiprocessing.freeze_support()
+
 APP_NAME = "VideoDub"
 
 

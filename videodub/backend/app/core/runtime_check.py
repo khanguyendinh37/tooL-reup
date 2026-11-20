@@ -59,6 +59,14 @@ def run_checks(report_path: str) -> None:
                                     text=True, check=True, timeout=20,
                                     **hidden_subprocess_kwargs())
             report['checks'][command] = result.stdout.splitlines()[0]
+        # On macOS a multiprocessing lock (tqdm creates one for download
+        # progress) starts a resource tracker by re-running the executable.
+        # In a frozen build without freeze_support() that relaunches the app.
+        import multiprocessing
+        lock = multiprocessing.RLock()
+        with lock:
+            pass
+        report['checks']['multiprocessing_lock'] = 'ok'
         # Model/API downloads use urllib; a frozen macOS build without a CA
         # bundle fails here instead of on the customer's first dubbing job.
         import urllib.request

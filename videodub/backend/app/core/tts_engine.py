@@ -5,6 +5,7 @@ import asyncio
 import logging
 import shutil
 import subprocess
+import unicodedata
 
 from app.core.process_utils import hidden_subprocess_kwargs
 
@@ -470,6 +471,41 @@ async def text_to_speech_with_fallback(text: str, voice: str, output_path: str, 
     return await text_to_speech_edge(text, voice, output_path, rate)
 
 
+# Languages whose Edge voices only read Latin-script text. Characters from
+# other scripts (an untranslated Chinese "哈哈哈") produce no audio at all.
+_LATIN_SCRIPT_LANGS = {
+    "af", "ca", "cs", "da", "de", "en", "es", "et", "eu", "fi", "fil", "fr", "ga",
+    "gl", "hr", "hu", "id", "is", "it", "jv", "lt", "lv", "ms", "mt", "nb", "nl",
+    "pl", "pt", "ro", "sk", "sl", "so", "sq", "su", "sv", "sw", "tr", "uz", "vi",
+    "zu",
+}
+_SPOKEN_PUNCTUATION = set(".,!?;:'\"-()%&/")
+
+
+def speakable_text(text: str, voice: str) -> str:
+    """Return the part of ``text`` the selected voice can actually read.
+
+    Edge TTS returns no audio ("NoAudioReceived") for cues made only of
+    punctuation, music notes, emoji or another script, and retrying never
+    helps. An empty result means the cue should stay silent.
+    """
+    lang = (get_edge_voice(voice) or "").split("-")[0].lower()
+    latin_only = lang in _LATIN_SCRIPT_LANGS
+    kept = []
+    for ch in text or "":
+        if ch.isalnum():
+            if latin_only and not ch.isdigit() and not unicodedata.name(ch, "").startswith("LATIN"):
+                kept.append(" ")
+            else:
+                kept.append(ch)
+        elif ch.isspace() or ch in _SPOKEN_PUNCTUATION:
+            kept.append(ch)
+        else:
+            kept.append(" ")
+    cleaned = " ".join("".join(kept).split())
+    return cleaned if any(ch.isalnum() for ch in cleaned) else ""
+
+
 async def _generate_segment_audio(index: int, segment: dict, voice: str,
                                   output_dir: str, rate: str, target_lang: str,
                                   semaphore: asyncio.Semaphore) -> dict | None:
@@ -493,12 +529,19 @@ async def _generate_segment_audio(index: int, segment: dict, voice: str,
     # moved into place once complete, so an existing file is never partial.
     if os.path.isfile(segment_path) and os.path.getsize(segment_path) > 0:
         return result
+    speakable = speakable_text(text, voice)
+    if not speakable:
+        # Nothing the voice can pronounce: keep the cue as silence instead of
+        # failing the whole job on a deterministic provider error.
+        logger.info("TTS segment %d has no speakable text for %s; leaving it silent: %r",
+                    index, voice, text[:80])
+        return {**result, "audio_path": None, "silent": True}
     partial_path = segment_path + ".part.mp3"
     async with semaphore:
         try:
             # Retry the selected voice with a bounded timeout.
             await asyncio.wait_for(
-                text_to_speech_with_fallback(text, voice, partial_path, rate, target_lang),
+                text_to_speech_with_fallback(speakable, voice, partial_path, rate, target_lang),
                 timeout=TTS_SEGMENT_TIMEOUT_SECONDS,
             )
             if os.path.exists(partial_path):
